@@ -283,7 +283,8 @@ async function onAddPluginSource() {
     Message.warning(t('settings.pluginSources.invalidId'))
     return
   }
-  if (!/^https?:\/\//i.test(url)) {
+  // github-topic sources are discovered dynamically and have no static URL.
+  if (newSourceKind.value !== 'github-topic' && !/^https?:\/\//i.test(url)) {
     Message.warning(t('settings.pluginSources.invalidUrl'))
     return
   }
@@ -302,6 +303,9 @@ async function onAddPluginSource() {
       order: store.settings.plugin_sources.length,
     },
   ])
+  // The save swallows backend errors, so only clear the form once the source
+  // actually landed in the refreshed settings.
+  if (!store.settings.plugin_sources.some((s) => s.id === id)) return
   newSourceId.value = ''
   newSourceUrl.value = ''
 }
@@ -310,16 +314,19 @@ async function onPluginSourceEnabledChange(
   source: PluginSourceConfig,
   value: string | number | boolean | Record<string, unknown> | (string | number | boolean | Record<string, unknown>)[],
 ) {
+  if (pluginSourceBusy.value) return
   await savePluginSources(
     store.settings.plugin_sources.map((s) => (s.id === source.id ? { ...s, enabled: Boolean(value) } : s)),
   )
 }
 
 async function onRemovePluginSource(id: string) {
+  if (pluginSourceBusy.value) return
   await savePluginSources(store.settings.plugin_sources.filter((s) => s.id !== id))
 }
 
 async function onMovePluginSource(index: number, delta: number) {
+  if (pluginSourceBusy.value) return
   const list = [...store.settings.plugin_sources]
   const target = index + delta
   if (target < 0 || target >= list.length) return
@@ -617,7 +624,7 @@ const homeColumns = computed(() => [
         />
         <a-button
           :loading="pluginSourceBusy"
-          :disabled="!newSourceId.trim() || !newSourceUrl.trim()"
+          :disabled="!newSourceId.trim() || (newSourceKind !== 'github-topic' && !newSourceUrl.trim())"
           @click="onAddPluginSource"
         >
           {{ t('settings.pluginSources.add') }}
@@ -637,6 +644,7 @@ const homeColumns = computed(() => [
               <span class="ps-col-enable">
                 <a-switch
                   :model-value="item.enabled"
+                  :disabled="pluginSourceBusy"
                   @change="(v) => onPluginSourceEnabledChange(item, v)"
                 />
               </span>
@@ -654,18 +662,18 @@ const homeColumns = computed(() => [
               <span class="ps-col-url plugin-source-url" :title="item.url">{{ item.url }}</span>
             </div>
             <template #actions>
-              <a-button size="mini" type="text" :disabled="index === 0" @click="onMovePluginSource(index, -1)">
+              <a-button size="mini" type="text" :disabled="pluginSourceBusy || index === 0" @click="onMovePluginSource(index, -1)">
                 ↑
               </a-button>
               <a-button
                 size="mini"
                 type="text"
-                :disabled="index === store.settings.plugin_sources.length - 1"
+                :disabled="pluginSourceBusy || index === store.settings.plugin_sources.length - 1"
                 @click="onMovePluginSource(index, 1)"
               >
                 ↓
               </a-button>
-              <a-button size="mini" status="danger" type="text" @click="onRemovePluginSource(item.id)">
+              <a-button size="mini" status="danger" type="text" :disabled="pluginSourceBusy" @click="onRemovePluginSource(item.id)">
                 {{ t('settings.pluginSources.delete') }}
               </a-button>
             </template>

@@ -20,7 +20,10 @@ const submitting = ref(false)
 /** Unverified sources must be explicitly acknowledged before installing. */
 const unverifiedAck = ref(false)
 
-const needsUnverifiedAck = computed(() => state.value?.plugin.confidence === 'unverified')
+const needsUnverifiedAck = computed(() => {
+  const c = state.value?.plugin.confidence
+  return c === undefined || c === 'unverified'
+})
 
 // A different plugin means a fresh acknowledgement.
 watch(

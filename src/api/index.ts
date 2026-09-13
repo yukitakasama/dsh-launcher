@@ -930,13 +930,10 @@ async function mockCall<T>(cmd: string, args?: Record<string, unknown>): Promise
       } as T
     }
     // ---- Plugin marketplace mocks (browser preview) ----
-    case 'list_plugin_sources':
-      return [
-        { id: 'dsh-plugins', url: 'https://github.com/dsh-plugins/registry', kind: 'primary', enabled: true, confidence: 'official', order: 0 },
-        { id: 'awesome-dsh-plugin', url: 'https://github.com/awesome-dsh-plugin/awesome-dsh-plugin', kind: 'awesome', enabled: true, confidence: 'curated', order: 1 },
-        { id: 'dshget', url: 'https://github.com/dshget/plugins', kind: 'dsh-get', enabled: true, confidence: 'aggregated', order: 2 },
-        { id: 'github-topic', url: '', kind: 'github-topic', enabled: false, confidence: 'unverified', order: 3 },
-      ] as T
+    case 'list_plugin_sources': {
+      const sources = db.settings.plugin_sources
+      return (sources && sources.length > 0 ? sources : seedDb().settings.plugin_sources) as T
+    }
     case 'fetch_plugin_market': {
       const q = ((args?.query as string) ?? '').trim().toLowerCase()
       const all: MarketPlugin[] = [
