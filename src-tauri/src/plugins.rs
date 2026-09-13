@@ -4244,11 +4244,33 @@ mod tests {
         );
     }
 
+    /// Market half of the live smoke test: fetches every default source over the
+    /// real network. Deliberately does NOT touch `api.github.com` (unreachable on
+    /// some networks without a proxy), so this half stays runnable anywhere the
+    /// three static catalogs are reachable.
     #[tokio::test]
     #[ignore]
-    async fn live_fetch_market_and_versions() {
-        let plugins = fetch_market_impl(default_plugin_sources(), None, None).await;
+    async fn live_fetch_market() {
+        let sources = default_plugin_sources();
+        let plugins = fetch_market_impl(sources.clone(), None, None).await;
         assert!(!plugins.is_empty(), "market must return plugins");
+        // Every enabled source must have contributed: a source that failed only
+        // logs a warning and is skipped, so a missing source id is the signal.
+        for src in sources.iter().filter(|s| s.enabled) {
+            assert!(
+                plugins.iter().any(|p| p.source == src.id),
+                "enabled source `{}` contributed nothing",
+                src.id
+            );
+        }
+        // The core-package red line holds for the merged live result too.
+        for p in &plugins {
+            assert!(
+                !is_core_package(&p.id),
+                "core package leaked into the market: {}",
+                p.id
+            );
+        }
         // The catalog must contain the loader plugin.
         assert!(
             plugins.iter().any(|p| p.id == "@dsh-plugin/dsh-loader"),
@@ -4272,6 +4294,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Versions half of the live smoke test. Requires npm and `api.github.com`;
+    /// on a network without a GitHub proxy the alpha leg cannot run, so this is
+    /// a separate test from `live_fetch_market`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_fetch_plugin_versions() {
         // npm-based stable versions for a known plugin.
         let stable = npm_versions("@dsh-plugin/dsh-auxiliary", &PluginChannel::Stable)
             .await
