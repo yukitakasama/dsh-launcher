@@ -242,21 +242,22 @@ pub struct PluginSourceConfig {
 - [x] 定稿 i18n 键位与命令签名(见 §2.5)
 
 ### 阶段 2:核心 — 源注册表 + DshGet 适配 + 动态 UI(A+D,立即 +2.4k)
-- [ ] 抽象 `fetch_catalog(src)`,抽取 Primary / Awesome 到 adapter
-- [ ] `PluginSource` enum 扩展(dshget 等)+ `MarketPlugin` 增加 `confidence` / `sources`
-- [ ] `DshGet` 适配器(复用 `parse_awesome_install`)
-- [ ] `LauncherSettings.plugin_sources` + `SettingsPatch` + `list_plugin_sources` 命令 + `lib.rs` 注册
+- [x] 抽象 `fetch_catalog(src)`,抽取 Primary / Awesome 到 adapter
+- [x] `PluginSource` enum → 字符串源 id + `MarketPlugin` 增加 `confidence` / `sources` / `repo` / `verification`
+- [x] `DshGet` 适配器(复用 `parse_awesome_install`,跳过 `installable:false`,兼容 `description{en,zh}`)
+- [x] `LauncherSettings.plugin_sources` + `SettingsPatch` + `list_plugin_sources` 命令 + `lib.rs` 注册 + `DSHLAUNCHER_PLUGIN_SOURCES` 覆盖
+- [x] 每源 last-good 磁盘缓存(`data_dir/plugin-cache/<id>.json`,失败降级不阻塞其余源)
 - [ ] `Market.vue` 动态源渲染;`Settings.vue` 源增删/排序/自定义 URL
 - [ ] i18n 双语;`api/types.ts` + `api/index.ts` mock 同步
 - [ ] `cargo check` + `pnpm build` 零错
 
 ### 阶段 3:GitHub topic 实时通道(C,风险最高)+ 可信度 UI
-- [ ] topic 搜索 client + 页级预算/退避(复用 `github_api_url`)
-- [ ] 降噪过滤 + denylist
-- [ ] `data_dir/plugin-cache/github-topic.json` TTL 24h + 断点分页 + last-good 兜底
+- [x] topic 搜索 client + 页级预算/退避(复用 `github_api_url`,2 页 × 100 条,3 次指数退避)
+- [x] 降噪过滤 + denylist(名匹配 `dsh-*` 或探测 `package.json` 的 `dsh.bundle` / `cordis.patch.yml`,探测预算 30)
+- [x] `data_dir/plugin-cache/github-topic.json` TTL 24h + 断点分页(后页失败保留已得页)+ last-good 兜底
 - [ ] `Unverified` 标识 + 安装前二次确认(InstallWizard)
-- [ ] 修复 `alpha_commit`(`plugins.rs:709`)实时条目 repo 回查失效
-- [ ] 单测:降噪过滤 / 去重分层 / TTL 缓存
+- [x] 修复 `alpha_commit` 实时条目 repo 回查失效(`fetch_plugin_versions` / `InstallPluginInput` 新增 `repo` 提示,`resolve_repo` 统一解析)
+- [x] 单测:降噪过滤 / 去重分层 / TTL 缓存 / 核心包排除 / dshget 解析
 
 ### 阶段 4:可选 — npm 反链通道 / 代码搜索
 - [ ] `registry.npmjs.org/-/v1/search` + 仓库双向校验(可选)
@@ -302,6 +303,7 @@ pub struct PluginSourceConfig {
 | — | 建档 | 主 agent | 依据 issue #46 + 基线 `3a802ae` 源码核验,产出本文件 | ✅ 完成 |
 | 1 | 阶段 0 现状确认 | 主 agent | 确认 `3a802ae` 为 HEAD 祖先且 `plugins.rs` 零漂移;拉取 dshget `catalog.json`(2460 条 / 2.6 MB)实测结构与 install 行兼容性;盘点 `PluginSource` 全部 6 处引用 | ✅ 完成(§1.6/§1.7) |
 | 2 | 阶段 1 设计定稿 | 主 agent | 定稿 `SourceKind`/`Confidence`/`PluginSourceConfig`、去重优先级、默认 4 描述符表、env 解析规则、topic 降噪 + denylist、`@deepseek-ai/*` 红线 | ✅ 完成(§2.6–§2.9) |
+| 3 | 阶段 2/3 后端 | 主 agent + worker(前端并行) | `config.rs` 新增源描述符与 sanitize;`plugins.rs` 重构为 adapter 注册表(primary/awesome/dshget/github-topic)、去重分层、核心包红线、last-good 缓存;`list_plugin_sources` 命令;`alpha_commit`/`do_install_plugin` 改用 repo 提示;45 个单测通过 | ✅ 后端完成(`cargo check` + `cargo test` 零错);前端待回填 |
 
 ---
 
