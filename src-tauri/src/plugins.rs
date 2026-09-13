@@ -470,7 +470,10 @@ async fn topic_search_page(page: u32) -> Result<Vec<serde_json::Value>, String> 
                     .unwrap_or_default())
             }
             Err(e) => {
-                crate::log_warn!("GitHub topic 搜索第 {page} 页失败(第 {} 次): {e}", attempt + 1);
+                crate::log_warn!(
+                    "GitHub topic 搜索第 {page} 页失败(第 {} 次): {e}",
+                    attempt + 1
+                );
                 last_err = e;
             }
         }
@@ -530,7 +533,10 @@ async fn fetch_github_topic() -> Result<Vec<MarketPlugin>, String> {
                 if repos.is_empty() {
                     return Err(e);
                 }
-                crate::log_warn!("topic 第 {page} 页失败，保留已获取的 {} 条候选: {e}", repos.len());
+                crate::log_warn!(
+                    "topic 第 {page} 页失败，保留已获取的 {} 条候选: {e}",
+                    repos.len()
+                );
                 break;
             }
         }
@@ -731,14 +737,14 @@ async fn fetch_catalog(src: &PluginSourceConfig) -> Result<Vec<MarketPlugin>, St
     match src.kind {
         SourceKind::Primary => {
             let v = fetch_json(&src.url, 8 * 1024 * 1024).await?;
-            let list: Vec<MarketPlugin> = serde_json::from_value(v)
-                .map_err(|e| format!("解析主源数据失败: {e}"))?;
+            let list: Vec<MarketPlugin> =
+                serde_json::from_value(v).map_err(|e| format!("解析主源数据失败: {e}"))?;
             Ok(tag_all(src, list))
         }
         SourceKind::Awesome => {
             let v = fetch_json(&src.url, 8 * 1024 * 1024).await?;
-            let cat: AwesomeCatalog = serde_json::from_value(v)
-                .map_err(|e| format!("解析 awesome 数据失败: {e}"))?;
+            let cat: AwesomeCatalog =
+                serde_json::from_value(v).map_err(|e| format!("解析 awesome 数据失败: {e}"))?;
             let mut out = Vec::new();
             for aw in &cat.plugins {
                 match awesome_to_market(aw) {
@@ -754,8 +760,8 @@ async fn fetch_catalog(src: &PluginSourceConfig) -> Result<Vec<MarketPlugin>, St
         }
         SourceKind::DshGet => {
             let v = fetch_json(&src.url, 8 * 1024 * 1024).await?;
-            let cat: DshGetCatalog = serde_json::from_value(v)
-                .map_err(|e| format!("解析 dshget 数据失败: {e}"))?;
+            let cat: DshGetCatalog =
+                serde_json::from_value(v).map_err(|e| format!("解析 dshget 数据失败: {e}"))?;
             let mut out = Vec::new();
             for p in &cat.plugins {
                 if let Some(mp) = dshget_to_market(p) {
@@ -3602,7 +3608,10 @@ mod tests {
     #[test]
     fn tag_entry_stamps_source_and_confidence() {
         let mut mp = entry("github:o/r", "r");
-        tag_entry(&mut mp, &src("dshget", SourceKind::DshGet, Confidence::Aggregated, 2));
+        tag_entry(
+            &mut mp,
+            &src("dshget", SourceKind::DshGet, Confidence::Aggregated, 2),
+        );
         assert_eq!(mp.source, "dshget");
         assert_eq!(mp.confidence, Confidence::Aggregated);
         assert_eq!(mp.sources, vec!["dshget"]);
@@ -3697,7 +3706,11 @@ mod tests {
         }"#;
         let cat: DshGetCatalog = serde_json::from_str(raw).unwrap();
         let parsed: Vec<MarketPlugin> = cat.plugins.iter().filter_map(dshget_to_market).collect();
-        assert_eq!(parsed.len(), 1, "uninstallable + unparsable entries dropped");
+        assert_eq!(
+            parsed.len(),
+            1,
+            "uninstallable + unparsable entries dropped"
+        );
         let mp = &parsed[0];
         assert_eq!(mp.id, "github:omdsh-dev/dsh-thing");
         assert_eq!(mp.repo.as_deref(), Some("omdsh-dev/dsh-thing"));
@@ -3712,10 +3725,7 @@ mod tests {
 
     #[test]
     fn normalize_repo_ref_accepts_common_forms() {
-        assert_eq!(
-            normalize_repo_ref("o/r").as_deref(),
-            Some("o/r")
-        );
+        assert_eq!(normalize_repo_ref("o/r").as_deref(), Some("o/r"));
         assert_eq!(
             normalize_repo_ref("https://github.com/o/r.git").as_deref(),
             Some("o/r")
@@ -3820,7 +3830,12 @@ mod tests {
     #[test]
     fn live_topic_cache_is_served_when_fresh() {
         let dir = std::env::temp_dir().join(format!("dsh-plugins-cache-{}", uuid::Uuid::new_v4()));
-        let s = src("github-topic", SourceKind::GithubTopic, Confidence::Unverified, 3);
+        let s = src(
+            "github-topic",
+            SourceKind::GithubTopic,
+            Confidence::Unverified,
+            3,
+        );
         let cached = vec![entry("github:o/r", "r")];
         write_source_cache(&dir, &s.id, &cached);
         assert!(read_source_cache(&dir, &s.id).is_some());
@@ -3834,7 +3849,12 @@ mod tests {
     #[tokio::test]
     async fn stale_topic_cache_is_refetched_instead_of_served() {
         let dir = std::env::temp_dir().join(format!("dsh-plugins-cache-{}", uuid::Uuid::new_v4()));
-        let s = src("github-topic", SourceKind::GithubTopic, Confidence::Unverified, 3);
+        let s = src(
+            "github-topic",
+            SourceKind::GithubTopic,
+            Confidence::Unverified,
+            3,
+        );
         // Write a cache whose timestamp is past the TTL.
         std::fs::create_dir_all(&dir).unwrap();
         let stale = SourceCache {
@@ -4217,7 +4237,9 @@ mod tests {
         // github: ids dominate this catalog, and every entry must carry a repo
         // hint so alpha version resolution works without a static catalog.
         assert!(
-            list.iter().filter(|p| p.id.starts_with("github:")).all(|p| p.repo.is_some()),
+            list.iter()
+                .filter(|p| p.id.starts_with("github:"))
+                .all(|p| p.repo.is_some()),
             "github: entries need a repo hint"
         );
     }
