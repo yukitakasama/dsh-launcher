@@ -714,6 +714,16 @@ pub(crate) async fn fetch_json_pub(url: &str, cap: usize) -> Result<serde_json::
 // Commands: catalog
 // ---------------------------------------------------------------------------
 
+/// Stamps a whole listing with its source. Every adapter funnels through this,
+/// so a new adapter cannot forget to attribute its entries (which would make
+/// them masquerade as the official catalog).
+fn tag_all(src: &PluginSourceConfig, mut list: Vec<MarketPlugin>) -> Vec<MarketPlugin> {
+    for p in &mut list {
+        tag_entry(p, src);
+    }
+    list
+}
+
 /// Adapter dispatch: fetches and parses one catalog over the network, tagging
 /// every entry with the source id + credibility. No caching here (see
 /// `fetch_source`).
@@ -721,12 +731,9 @@ async fn fetch_catalog(src: &PluginSourceConfig) -> Result<Vec<MarketPlugin>, St
     match src.kind {
         SourceKind::Primary => {
             let v = fetch_json(&src.url, 8 * 1024 * 1024).await?;
-            let mut list: Vec<MarketPlugin> = serde_json::from_value(v)
+            let list: Vec<MarketPlugin> = serde_json::from_value(v)
                 .map_err(|e| format!("解析主源数据失败: {e}"))?;
-            for p in &mut list {
-                tag_entry(p, src);
-            }
-            Ok(list)
+            Ok(tag_all(src, list))
         }
         SourceKind::Awesome => {
             let v = fetch_json(&src.url, 8 * 1024 * 1024).await?;
@@ -735,10 +742,7 @@ async fn fetch_catalog(src: &PluginSourceConfig) -> Result<Vec<MarketPlugin>, St
             let mut out = Vec::new();
             for aw in &cat.plugins {
                 match awesome_to_market(aw) {
-                    Some(mut mp) => {
-                        tag_entry(&mut mp, src);
-                        out.push(mp);
-                    }
+                    Some(mp) => out.push(mp),
                     None => crate::log_warn!(
                         "awesome 条目「{}」install 行无法解析，跳过: {}",
                         aw.name,
@@ -746,7 +750,7 @@ async fn fetch_catalog(src: &PluginSourceConfig) -> Result<Vec<MarketPlugin>, St
                     ),
                 }
             }
-            Ok(out)
+            Ok(tag_all(src, out))
         }
         SourceKind::DshGet => {
             let v = fetch_json(&src.url, 8 * 1024 * 1024).await?;
@@ -754,14 +758,13 @@ async fn fetch_catalog(src: &PluginSourceConfig) -> Result<Vec<MarketPlugin>, St
                 .map_err(|e| format!("解析 dshget 数据失败: {e}"))?;
             let mut out = Vec::new();
             for p in &cat.plugins {
-                if let Some(mut mp) = dshget_to_market(p) {
-                    tag_entry(&mut mp, src);
+                if let Some(mp) = dshget_to_market(p) {
                     out.push(mp);
                 }
             }
-            Ok(out)
+            Ok(tag_all(src, out))
         }
-        SourceKind::GithubTopic => fetch_github_topic().await,
+        SourceKind::GithubTopic => Ok(tag_all(src, fetch_github_topic().await?)),
     }
 }
 
@@ -780,8 +783,18 @@ fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// Cache file for one source. The id is sanitised for filesystem safety AND
+/// hashed: ids are user-supplied and distinct ids can sanitise to the same name
+/// (e.g. `a/b` and `a_b`), which would let sources serve each other's cache.
 fn cache_file(cache_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
-    cache_dir.join(format!("{}.json", sanitize_name(id)))
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(id.as_bytes());
+    let hash = digest
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    cache_dir.join(format!("{}-{hash}.json", sanitize_name(id)))
 }
 
 fn read_source_cache(cache_dir: &std::path::Path, id: &str) -> Option<SourceCache> {
@@ -839,26 +852,38 @@ async fn fetch_source(
     }
 }
 
+/// Whether `owner/repo` belongs to DeepSeek's own org.
+fn is_core_repo(repo: &str) -> bool {
+    repo.split('/')
+        .next()
+        .is_some_and(|owner| owner.eq_ignore_ascii_case("deepseek-ai"))
+}
+
 /// The grain red line (issue #46): never surface DeepSeek's own core packages
-/// as installable marketplace plugins, whatever source produced them.
+/// as installable marketplace plugins, whatever source produced them. Matching
+/// is normalised (trimmed, `npm:` prefix stripped, case-insensitive) so a
+/// source cannot slip one past with cosmetic differences.
 fn is_core_package(id: &str) -> bool {
-    if id.starts_with("@deepseek-ai/") {
+    let id = id.trim();
+    let id = id.strip_prefix("npm:").unwrap_or(id);
+    if id.to_lowercase().starts_with("@deepseek-ai/") {
         return true;
     }
-    match parse_github_id(id) {
-        Some((repo, _)) => repo
-            .split('/')
-            .next()
-            .map_or(false, |owner| owner.eq_ignore_ascii_case("deepseek-ai")),
-        None => false,
-    }
+    parse_github_id(id).is_some_and(|(repo, _)| is_core_repo(&repo))
+}
+
+/// Drops an entry if either its install id or its repo hint points at a core
+/// package: the hint is what alpha resolution/installs follow, so a benign id
+/// paired with a core repo must not get through.
+fn entry_is_core(p: &MarketPlugin) -> bool {
+    is_core_package(&p.id) || p.repo.as_deref().is_some_and(is_core_repo)
 }
 
 /// Drops core packages from one source's listing, logging each drop.
 fn drop_core_packages(src_id: &str, list: Vec<MarketPlugin>) -> Vec<MarketPlugin> {
     list.into_iter()
         .filter(|p| {
-            if is_core_package(&p.id) {
+            if entry_is_core(p) {
                 crate::log_warn!("插件源「{src_id}」返回核心包「{}」，已丢弃", p.id);
                 false
             } else {
@@ -912,10 +937,11 @@ fn merge_into(dst: &mut MarketPlugin, src: MarketPlugin) {
     if dst.category.is_none() {
         dst.category = src.category;
     }
-    if dst.repo.is_none() {
-        dst.repo = src.repo;
-    }
     if src.confidence > dst.confidence {
+        // The more trustworthy source wins wholesale — including its repo hint,
+        // which alpha resolution and alpha installs both follow. Keeping a
+        // lower-trust source's `repo` would make the installed/queried repo
+        // disagree with the entry the user selected.
         dst.confidence = src.confidence;
         dst.source = src.source;
         dst.name = src.name;
@@ -924,6 +950,10 @@ fn merge_into(dst: &mut MarketPlugin, src: MarketPlugin) {
         dst.relationship = src.relationship;
         dst.support_versions = src.support_versions;
         dst.verification = src.verification;
+        dst.repo = src.repo;
+    } else if dst.repo.is_none() {
+        // Equal or lower tier: only fill a gap we cannot otherwise resolve.
+        dst.repo = src.repo;
     }
 }
 
@@ -940,37 +970,85 @@ fn matches_query(p: &MarketPlugin, q: &str) -> bool {
     }
 }
 
-/// Core market listing: fetches every enabled source concurrently (a slow or
-/// failing source never blocks the others; it falls back to its last-good
-/// cache), drops core packages, merges duplicates, then filters by `query`.
+/// Overall budget for one market refresh. Sources are fetched concurrently, so
+/// this bounds the whole listing: a source that misses the deadline is skipped
+/// (it keeps whatever it cached on a previous run, and is logged), rather than
+/// holding the market hostage.
+const MARKET_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Core market listing: fetches every enabled source concurrently, drops core
+/// packages, merges duplicates, then filters by `query`. Sources that fail or
+/// exceed the deadline are skipped in favour of their last-good cache, so one
+/// bad source never prevents the rest of the market from rendering.
 async fn fetch_market_impl(
     sources: Vec<PluginSourceConfig>,
     cache_dir: Option<std::path::PathBuf>,
     query: Option<String>,
 ) -> Vec<MarketPlugin> {
-    let mut enabled: Vec<PluginSourceConfig> =
+    let mut all_enabled: Vec<PluginSourceConfig> =
         sources.into_iter().filter(|s| s.enabled).collect();
-    enabled.sort_by_key(|s| s.order);
+    all_enabled.sort_by_key(|s| s.order);
 
-    let mut set: tokio::task::JoinSet<(PluginSourceConfig, Result<Vec<MarketPlugin>, String>)> =
+    // Tasks report `(order, id, result)`. An aborted task's output is discarded
+    // by JoinSet, so which sources finished is tracked here rather than read
+    // back out of the set.
+    let mut set: tokio::task::JoinSet<(u32, String, Result<Vec<MarketPlugin>, String>)> =
         tokio::task::JoinSet::new();
-    for src in enabled {
+    for src in all_enabled.iter().cloned() {
         let dir = cache_dir.clone();
         set.spawn(async move {
             let res = fetch_source(&src, dir.as_deref()).await;
-            (src, res)
+            (src.order, src.id, res)
         });
     }
 
     let mut collected: Vec<(u32, Vec<MarketPlugin>)> = Vec::new();
-    while let Some(joined) = set.join_next().await {
+    let mut finished: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + MARKET_FETCH_BUDGET;
+    loop {
+        let joined = match tokio::time::timeout_at(deadline, set.join_next()).await {
+            Ok(Some(j)) => j,
+            // No tasks left.
+            Ok(None) => break,
+            // Budget exhausted: the rest are aborted below.
+            Err(_) => break,
+        };
         match joined {
-            Ok((src, Ok(list))) => {
-                collected.push((src.order, drop_core_packages(&src.id, list)));
+            Ok((order, id, Ok(list))) => {
+                finished.insert(id.clone());
+                collected.push((order, drop_core_packages(&id, list)));
             }
-            Ok((src, Err(e))) => crate::log_warn!("插件源「{}」获取失败，忽略: {e}", src.id),
+            Ok((_, id, Err(e))) => {
+                finished.insert(id.clone());
+                crate::log_warn!("插件源「{id}」获取失败，忽略: {e}");
+            }
             Err(e) => crate::log_warn!("插件源任务异常: {e}"),
         }
+    }
+    // Sources that never reported (over budget or panicked): fall back to their
+    // last-good cache so they still contribute last-known data.
+    set.abort_all();
+    for src in all_enabled.iter() {
+        if finished.contains(&src.id) {
+            continue;
+        }
+        if let Some(dir) = cache_dir.as_deref() {
+            if let Some(c) = read_source_cache(dir, &src.id) {
+                crate::log_warn!(
+                    "插件源「{}」超出 {}s 预算，改用 last-good 缓存({} 条)",
+                    src.id,
+                    MARKET_FETCH_BUDGET.as_secs(),
+                    c.plugins.len()
+                );
+                collected.push((src.order, c.plugins));
+                continue;
+            }
+        }
+        crate::log_warn!(
+            "插件源「{}」超出 {}s 预算且无缓存，本次跳过",
+            src.id,
+            MARKET_FETCH_BUDGET.as_secs()
+        );
     }
 
     let plugins = merge_plugins(collected);
@@ -1370,11 +1448,16 @@ async fn alpha_commit(
     page: u32,
     repo_hint: Option<&str>,
 ) -> Result<PluginVersionPage, String> {
-    // Alpha needs the GitHub repo; the frontend passes the market entry's repo
-    // hint (required for live entries, which are in no static catalog), and a
-    // `github:` plugin id is a reliable fallback.
-    let repo = resolve_repo(plugin_id, repo_hint)
-        .ok_or_else(|| format!("插件 {plugin_id} 没有可用的 GitHub 仓库地址"))?;
+    // Alpha needs the GitHub repo. For a `github:` id the id itself is
+    // authoritative (it also carries the monorepo subpath that must match the
+    // commits queried); the frontend's repo hint is only used for ids that
+    // cannot name a repo on their own, e.g. live-discovered npm packages.
+    let repo = if let Some((repo, _)) = parse_github_id(plugin_id) {
+        repo
+    } else {
+        resolve_repo(plugin_id, repo_hint)
+            .ok_or_else(|| format!("插件 {plugin_id} 没有可用的 GitHub 仓库地址"))?
+    };
 
     // Monorepo plugins (`github:owner/repo#path:<subdir>`): restrict the
     // commit list to commits touching the plugin's own directory.
@@ -3486,6 +3569,37 @@ mod tests {
     }
 
     #[test]
+    fn core_check_resists_cosmetic_variants() {
+        // Leading/trailing whitespace and the `npm:` alias form.
+        assert!(is_core_package("  @deepseek-ai/dsh  "));
+        assert!(is_core_package("npm:@deepseek-ai/dsh"));
+        // A benign-looking install id with a core repo hint is still core: the
+        // hint is what alpha resolution and installation follow.
+        let mut p = entry("some-innocent-name", "innocent");
+        p.repo = Some("deepseek-ai/dsh".to_string());
+        assert!(entry_is_core(&p));
+        assert_eq!(drop_core_packages("test", vec![p]).len(), 0);
+        // A non-core repo hint passes.
+        let mut ok = entry("dsh-tool", "tool");
+        ok.repo = Some("someone/dsh-tool".to_string());
+        assert!(!entry_is_core(&ok));
+    }
+
+    #[test]
+    fn cache_files_do_not_collide_for_distinct_ids() {
+        let dir = std::path::Path::new("plugin-cache");
+        assert_ne!(
+            cache_file(dir, "a/b"),
+            cache_file(dir, "a_b"),
+            "distinct source ids must not share a cache file"
+        );
+        assert_ne!(cache_file(dir, "x"), cache_file(dir, "y"));
+        // Path traversal is neutralised: the result never escapes the dir.
+        let evil = cache_file(dir, "../../../etc/passwd");
+        assert_eq!(evil.parent(), Some(dir));
+    }
+
+    #[test]
     fn tag_entry_stamps_source_and_confidence() {
         let mut mp = entry("github:o/r", "r");
         tag_entry(&mut mp, &src("dshget", SourceKind::DshGet, Confidence::Aggregated, 2));
@@ -3510,8 +3624,10 @@ mod tests {
         high.stars = Some(3);
         high.repo = Some("o/r".to_string());
 
-        // Lower-confidence source first: the later, higher tier must win.
-        let merged = merge_plugins(vec![(1, vec![low]), (0, vec![high])]);
+        // Higher-order source first (same order the registry uses: official
+        // listed before the community catalog): the later, higher tier must
+        // still win, including its repo hint.
+        let merged = merge_plugins(vec![(1, vec![low.clone()]), (0, vec![high.clone()])]);
         assert_eq!(merged.len(), 1);
         let m = &merged[0];
         assert_eq!(m.source, "dsh-plugins");
@@ -3523,6 +3639,33 @@ mod tests {
         assert_eq!(m.repo.as_deref(), Some("o/r"));
         assert!(m.sources.contains(&"dsh-plugins".to_string()));
         assert!(m.sources.contains(&"awesome-dsh-plugin".to_string()));
+
+        // Budget 0 (lower order) first, then the better source: the winner's
+        // repo hint must replace the low-trust one, not be shadowed by it.
+        let mut low_other = low.clone();
+        low_other.repo = Some("attacker/mirror".to_string());
+        let merged2 = merge_plugins(vec![(0, vec![low_other]), (2, vec![high.clone()])]);
+        assert_eq!(merged2.len(), 1);
+        assert_eq!(merged2[0].confidence, Confidence::Official);
+        assert_eq!(
+            merged2[0].repo.as_deref(),
+            Some("o/r"),
+            "the more trustworthy source's repo hint must win"
+        );
+
+        // Equal tiers (different ids): the first-processed entry keeps identity,
+        // and a missing repo is filled from the later one.
+        let mut first = entry("github:a/x", "first");
+        first.source = "s1".to_string();
+        first.confidence = Confidence::Aggregated;
+        let mut second = entry("github:a/x", "second");
+        second.source = "s2".to_string();
+        second.confidence = Confidence::Aggregated;
+        second.repo = Some("a/x".to_string());
+        let merged3 = merge_plugins(vec![(0, vec![first]), (1, vec![second])]);
+        assert_eq!(merged3[0].name, "first");
+        assert_eq!(merged3[0].source, "s1");
+        assert_eq!(merged3[0].repo.as_deref(), Some("a/x"));
     }
 
     #[test]
@@ -3685,6 +3828,35 @@ mod tests {
         let read = read_source_cache(&dir, &s.id).unwrap();
         assert_eq!(read.plugins.len(), 1);
         assert!(now_ts() - read.saved_at < TOPIC_CACHE_TTL_SECS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn stale_topic_cache_is_refetched_instead_of_served() {
+        let dir = std::env::temp_dir().join(format!("dsh-plugins-cache-{}", uuid::Uuid::new_v4()));
+        let s = src("github-topic", SourceKind::GithubTopic, Confidence::Unverified, 3);
+        // Write a cache whose timestamp is past the TTL.
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = SourceCache {
+            saved_at: now_ts() - TOPIC_CACHE_TTL_SECS - 60,
+            plugins: vec![entry("github:stale/x", "stale")],
+        };
+        std::fs::write(
+            cache_file(&dir, &s.id),
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+
+        // The TTL governs when we refetch on success, not whether a failed
+        // refresh may fall back: a stale cache must not short-circuit the
+        // fetch, but it must still be used as last-good when the network fails
+        // (that is the whole point of the cache). Here the refresh is attempted
+        // and fails (api.github.com is unreachable here), so the old entries
+        // return as last-good rather than the refresh erroring out.
+        let got = fetch_source(&s, Some(&dir))
+            .await
+            .expect("last-good fallback");
+        assert_eq!(got[0].id, "github:stale/x");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
