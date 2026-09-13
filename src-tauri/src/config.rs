@@ -127,7 +127,11 @@ pub fn default_plugin_sources() -> Vec<PluginSourceConfig> {
         },
         PluginSourceConfig {
             id: "dshget".to_string(),
-            url: "https://raw.githubusercontent.com/bobby-sheng/dshget-data/main/catalog.json"
+            // Served through the jsDelivr CDN: raw.githubusercontent.com is
+            // unreachable on some networks (observed in CN), while the CDN
+            // mirror serves the identical snapshot. Users can point this at
+            // raw.githubusercontent.com or another mirror in Settings.
+            url: "https://cdn.jsdelivr.net/gh/bobby-sheng/dshget-data@main/catalog.json"
                 .to_string(),
             kind: SourceKind::DshGet,
             enabled: true,

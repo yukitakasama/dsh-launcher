@@ -5,13 +5,13 @@ import { useI18n } from 'vue-i18n'
 import { useLauncherStore } from '@/stores/launcher'
 import { injectDownloadScroll } from '@/composables/download-scroll'
 import { api } from '@/api'
-import type { MarketPlugin, PluginSource } from '@/api/types'
+import type { Confidence, MarketPlugin, PluginSource } from '@/api/types'
 
 // keep-alive name: the download page caches this view (search/scroll state).
 defineOptions({ name: 'MarketPage' })
 
 const router = useRouter()
-const { t } = useI18n()
+const { t, te } = useI18n()
 const store = useLauncherStore()
 const scrollAccessor = injectDownloadScroll()
 
@@ -38,6 +38,19 @@ function pickDescription(p: MarketPlugin): string {
 /** Source of an entry; absent on old payloads means the primary catalog. */
 function sourceOf(p: MarketPlugin): PluginSource {
   return p.source ?? 'dsh-plugins'
+}
+
+/** Display name for a source id (known ids are translated, custom ids as-is). */
+function sourceLabel(id: string): string {
+  const key = `plugins.source.${id}`
+  return te(key) ? t(key) : id
+}
+
+const CONFIDENCE_COLORS: Record<Confidence, string> = {
+  official: 'green',
+  curated: 'purple',
+  aggregated: 'blue',
+  unverified: 'orangered',
 }
 
 const filtered = computed(() => {
@@ -84,6 +97,7 @@ async function load() {
 }
 
 onMounted(() => {
+  store.refreshPluginSources()
   if (store.marketPlugins.length === 0) load()
   // Restore the saved scroll offset once the list has re-rendered.
   nextTick(() => {
@@ -108,8 +122,9 @@ onBeforeUnmount(() => {
         <a-space>
           <a-select v-model="sourceFilter" class="source-select" size="small">
             <a-option value="">{{ t('plugins.sourceAll') }}</a-option>
-            <a-option value="dsh-plugins">dsh-plugins</a-option>
-            <a-option value="awesome-dsh-plugin">awesome-dsh-plugin</a-option>
+            <a-option v-for="s in store.pluginSources" :key="s.id" :value="s.id">
+              {{ sourceLabel(s.id) }}
+            </a-option>
           </a-select>
           <a-input
             v-model="search"
@@ -150,8 +165,15 @@ onBeforeUnmount(() => {
             <div class="plugin-name">
               {{ p.name }}
               <span class="plugin-id">{{ p.id }}</span>
-              <a-tag v-if="sourceOf(p) === 'awesome-dsh-plugin'" size="small" color="purple">
-                awesome
+              <a-tag v-if="sourceOf(p) !== 'dsh-plugins'" size="small">
+                {{ sourceLabel(sourceOf(p)) }}
+              </a-tag>
+              <a-tag
+                v-if="p.confidence"
+                size="small"
+                :color="CONFIDENCE_COLORS[p.confidence]"
+              >
+                {{ t(`plugins.confidence.${p.confidence}`) }}
               </a-tag>
             </div>
             <div class="plugin-desc">{{ pickDescription(p) }}</div>

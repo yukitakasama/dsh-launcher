@@ -63,8 +63,18 @@
 ### 1.6 dshget `catalog.json` 实测样本(阶段 0 核验)
 
 - **仓库**:`bobby-sheng/dshget-data`(默认分支 `main`);快照 URL:
-  `https://raw.githubusercontent.com/bobby-sheng/dshget-data/main/catalog.json`
+  `https://cdn.jsdelivr.net/gh/bobby-sheng/dshget-data@main/catalog.json`
 - **体积**:2,603,554 字节(2.6 MB)→ 现有 `fetch_json` cap 需按 8 MB 给足。
+- **⚠️ 可达性实测(阶段 2 发现,已改变定稿)**:本机(及国内多数网络)
+  `raw.githubusercontent.com` 与 `api.github.com` **不可达**(curl 000 / reqwest 请求失败),
+  而 jsDelivr CDN 返回**字节数完全相同**的 2,603,554 B 快照
+  (`cdn` / `fastly` / `gcore` 三个节点均 200,1.6–4.7s)。
+  故 dshget 默认 URL **改用 jsDelivr**,topic 探测也改走
+  `https://cdn.jsdelivr.net/gh/<owner>/<repo>@HEAD/{package.json,cordis.patch.yml}`。
+  用户在设置页可改回 `raw.githubusercontent.com` 或自建镜像。
+  推论:GitHub 搜索/API 与 alpha/release 通道本就依赖代理,故 `github-topic` 默认关闭是合理默认。
+  端到端验证:新增 `live_dshget_catalog_parses_and_filters_core`(`--ignored`)实测通过
+  —— >1000 条、全部带 `source`/`confidence`、github 条目全部带 `repo` 提示、无核心包。
 - **顶层结构**:`{ name, url, sources[], updated, syncedAt, count, categories{}, plugins[] }`,`count = 2460`。
 - **`sources[]`** 是上游归属表(awesome-dsh-plugin / hrhgit-catalog / omdsh-hub / github-topic),与本次的 launcher 源 id 不同层,但可映射进 `MarketPlugin.sources` 归属。
 - **条目字段**(实测 union):`name, owner, url, page, category, description{en,zh}, npm, stars, install, added, sources[], verification, installable, license, version, featured, tags[]`。
@@ -201,7 +211,7 @@ pub struct PluginSourceConfig {
 | --- | --- | --- | --- | --- | --- |
 | 0 | `dsh-plugins` | `primary` | `official` | ✅ | `https://dsh-plug.in/api/plugins.json` |
 | 1 | `awesome-dsh-plugin` | `awesome` | `curated` | ✅ | `https://awesome-dsh-plugin.com/plugins.json` |
-| 2 | `dshget` | `dsh-get` | `aggregated` | ✅ | `https://raw.githubusercontent.com/bobby-sheng/dshget-data/main/catalog.json` |
+| 2 | `dshget` | `dsh-get` | `aggregated` | ✅ | `https://cdn.jsdelivr.net/gh/bobby-sheng/dshget-data@main/catalog.json` |
 | 3 | `github-topic` | `github-topic` | `unverified` | ⬜ | (无静态 URL,走 search API) |
 
 `DSHLAUNCHER_PLUGIN_SOURCES` 解析规则(设置存在时**整体覆盖**启用列表):
@@ -247,15 +257,15 @@ pub struct PluginSourceConfig {
 - [x] `DshGet` 适配器(复用 `parse_awesome_install`,跳过 `installable:false`,兼容 `description{en,zh}`)
 - [x] `LauncherSettings.plugin_sources` + `SettingsPatch` + `list_plugin_sources` 命令 + `lib.rs` 注册 + `DSHLAUNCHER_PLUGIN_SOURCES` 覆盖
 - [x] 每源 last-good 磁盘缓存(`data_dir/plugin-cache/<id>.json`,失败降级不阻塞其余源)
-- [ ] `Market.vue` 动态源渲染;`Settings.vue` 源增删/排序/自定义 URL
-- [ ] i18n 双语;`api/types.ts` + `api/index.ts` mock 同步
-- [ ] `cargo check` + `pnpm build` 零错
+- [x] `Market.vue` 动态源渲染;`Settings.vue` 源增删/排序/自定义 URL
+- [x] i18n 双语;`api/types.ts` + `api/index.ts` mock 同步
+- [x] `cargo check` + `vue-tsc --noEmit` + `vite build` 零错(129 单测全过)
 
 ### 阶段 3:GitHub topic 实时通道(C,风险最高)+ 可信度 UI
 - [x] topic 搜索 client + 页级预算/退避(复用 `github_api_url`,2 页 × 100 条,3 次指数退避)
 - [x] 降噪过滤 + denylist(名匹配 `dsh-*` 或探测 `package.json` 的 `dsh.bundle` / `cordis.patch.yml`,探测预算 30)
 - [x] `data_dir/plugin-cache/github-topic.json` TTL 24h + 断点分页(后页失败保留已得页)+ last-good 兜底
-- [ ] `Unverified` 标识 + 安装前二次确认(InstallWizard)
+- [x] `Unverified` 标识 + 安装前二次确认(InstallWizard)—— 市场列表红色标签 + 向导警告横幅 + 勾选后才可提交
 - [x] 修复 `alpha_commit` 实时条目 repo 回查失效(`fetch_plugin_versions` / `InstallPluginInput` 新增 `repo` 提示,`resolve_repo` 统一解析)
 - [x] 单测:降噪过滤 / 去重分层 / TTL 缓存 / 核心包排除 / dshget 解析
 
@@ -303,7 +313,9 @@ pub struct PluginSourceConfig {
 | — | 建档 | 主 agent | 依据 issue #46 + 基线 `3a802ae` 源码核验,产出本文件 | ✅ 完成 |
 | 1 | 阶段 0 现状确认 | 主 agent | 确认 `3a802ae` 为 HEAD 祖先且 `plugins.rs` 零漂移;拉取 dshget `catalog.json`(2460 条 / 2.6 MB)实测结构与 install 行兼容性;盘点 `PluginSource` 全部 6 处引用 | ✅ 完成(§1.6/§1.7) |
 | 2 | 阶段 1 设计定稿 | 主 agent | 定稿 `SourceKind`/`Confidence`/`PluginSourceConfig`、去重优先级、默认 4 描述符表、env 解析规则、topic 降噪 + denylist、`@deepseek-ai/*` 红线 | ✅ 完成(§2.6–§2.9) |
-| 3 | 阶段 2/3 后端 | 主 agent + worker(前端并行) | `config.rs` 新增源描述符与 sanitize;`plugins.rs` 重构为 adapter 注册表(primary/awesome/dshget/github-topic)、去重分层、核心包红线、last-good 缓存;`list_plugin_sources` 命令;`alpha_commit`/`do_install_plugin` 改用 repo 提示;45 个单测通过 | ✅ 后端完成(`cargo check` + `cargo test` 零错);前端待回填 |
+| 3 | 阶段 2/3 后端 | 主 agent | `config.rs` 新增源描述符与 sanitize;`plugins.rs` 重构为 adapter 注册表(primary/awesome/dshget/github-topic)、去重分层、核心包红线、last-good 缓存;`list_plugin_sources` 命令;`alpha_commit`/`do_install_plugin` 改用 repo 提示;单测扩至 45 项 | ✅ 完成(`cargo check` + `cargo test` 零错) |
+| 3b | 阶段 2/3 可达性修正 | 主 agent | 实测 raw.githubusercontent/api.github.com 不可达而 jsDelivr 三节点均 200 且字节一致 → dshget 默认源与 topic 探测改走 jsDelivr;新增 `live_dshget_catalog_parses_and_filters_core` 实测通过(>1000 条、全部带 source/confidence/repo、无核心包) | ✅ 完成(§1.6 已回填) |
+| 4 | 阶段 2/3 前端 | worker(并行子代理) | types/api mock/store/Market/Settings/InstallWizard/VersionPick + i18n 双语;主 agent 复核并补:源编辑后失效 `pluginSourcesLoadedAt` 缓存、mock topic id 对齐真实 `github:<owner>/<repo>` 形态、探测加 8s 超时 | ✅ 完成(`vue-tsc --noEmit` 0 错,`vite build` ✓ 13.87s) |
 
 ---
 

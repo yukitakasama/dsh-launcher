@@ -482,10 +482,16 @@ async fn topic_search_page(page: u32) -> Result<Vec<serde_json::Value>, String> 
 /// API call) for a DSH plugin manifest: `package.json` declaring a `dsh.bundle`,
 /// or a `cordis.patch.yml`.
 async fn repo_has_dsh_manifest(full_name: &str) -> bool {
-    let Ok(client) = http_client() else {
+    // Probes are best-effort and numerous, so use a much shorter timeout than
+    // the catalog fetches: a stalled CDN must not stall the whole refresh.
+    let Ok(client) = crate::proxy::apply(reqwest::Client::builder())
+        .timeout(std::time::Duration::from_secs(8))
+        .user_agent("dsh-launcher")
+        .build()
+    else {
         return false;
     };
-    let pkg_url = format!("https://raw.githubusercontent.com/{full_name}/HEAD/package.json");
+    let pkg_url = format!("https://cdn.jsdelivr.net/gh/{full_name}@HEAD/package.json");
     if let Ok(resp) = client.get(&pkg_url).send().await {
         if resp.status().is_success() {
             if let Ok(bytes) = resp.bytes().await {
@@ -501,7 +507,7 @@ async fn repo_has_dsh_manifest(full_name: &str) -> bool {
             }
         }
     }
-    let patch_url = format!("https://raw.githubusercontent.com/{full_name}/HEAD/cordis.patch.yml");
+    let patch_url = format!("https://cdn.jsdelivr.net/gh/{full_name}@HEAD/cordis.patch.yml");
     matches!(client.get(&patch_url).send().await, Ok(r) if r.status().is_success())
 }
 
@@ -3981,6 +3987,37 @@ mod tests {
 
     // Live network smoke tests (skipped by default; run with
     // `cargo test plugins::tests::live_ -- --ignored`).
+    #[tokio::test]
+    #[ignore]
+    async fn live_dshget_catalog_parses_and_filters_core() {
+        let dshget = default_plugin_sources()
+            .into_iter()
+            .find(|s| s.id == "dshget")
+            .expect("dshget source is a default");
+        let list = fetch_catalog(&dshget)
+            .await
+            .expect("dshget catalog must be fetchable");
+        assert!(list.len() > 1000, "catalog is large, got {}", list.len());
+        assert!(
+            list.iter().all(|p| p.source == "dshget"),
+            "every entry must be stamped with the source id"
+        );
+        assert!(
+            list.iter().all(|p| p.confidence == Confidence::Aggregated),
+            "every entry must carry the source's confidence"
+        );
+        assert!(
+            list.iter().all(|p| !is_core_package(&p.id)),
+            "the adapter must not emit core packages (checked by fetch_market_impl too)"
+        );
+        // github: ids dominate this catalog, and every entry must carry a repo
+        // hint so alpha version resolution works without a static catalog.
+        assert!(
+            list.iter().filter(|p| p.id.starts_with("github:")).all(|p| p.repo.is_some()),
+            "github: entries need a repo hint"
+        );
+    }
+
     #[tokio::test]
     #[ignore]
     async fn live_fetch_market_and_versions() {
