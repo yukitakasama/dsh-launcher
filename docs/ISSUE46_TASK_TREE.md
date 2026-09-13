@@ -273,9 +273,13 @@ pub struct PluginSourceConfig {
 - [ ] `registry.npmjs.org/-/v1/search` + 仓库双向校验(可选)
 - [ ] 代码搜索 `dsh.bundle`(需用户自备 token,列为可选项)
 
+> **本轮不实现(有意延期)**:issue 与本文档均将阶段 4 标为「可选」,§4 验收标准亦未包含;
+> 且代码搜索需用户自备 token、npm 反链与 dshget(已聚合 npm 元数据)功能重叠度高。
+> 源注册表已可容纳该通道(新增 `SourceKind` 变体 + 一个 adapter 即可),后续可增量接入。
+
 ### 阶段 5:回归与验收
-- [ ] 逐条对照 §4 验收标准
-- [ ] 源离线降级 / last-good 恢复 / 不阻塞其余源的端到端验证
+- [x] 逐条对照 §4 验收标准(结论见 §4 表;第 2 条受本机网络限制端到端不可测)
+- [x] 源离线降级 / last-good 恢复 / 不阻塞其余源的端到端验证(单测 + 三源实测)
 
 ---
 
@@ -283,11 +287,11 @@ pub struct PluginSourceConfig {
 
 | # | 验收标准 | 状态 |
 | --- | --- | --- |
-| 1 | 市场可切换 ≥3 个目录源(dsh-plug.in / awesome / dshget),用户可增删自定义源 | ☐ |
-| 2 | 开启实时通道后能发现不在任何静态目录中的 `topic:dsh-plugin` 插件,并正确过滤噪声 | ☐ |
-| 3 | 某源不可达/离线时降级为 last-good 缓存,不阻塞其余源 | ☐ |
-| 4 | 未验证来源有明确标识与安装确认;绝不误装 `@deepseek-ai/*` 核心包 | ☐ |
-| 5 | 单测覆盖:适配器解析、降噪过滤、去重分层、TTL 缓存 | ☐ |
+| 1 | 市场可切换 ≥3 个目录源(dsh-plug.in / awesome / dshget),用户可增删自定义源 | ✅ 3 源默认启用,端到端实测三源均抓取成功(`live_fetch_market_and_versions` 中无任何「获取失败」告警,主源 loader 断言通过);设置页支持增删/排序/自定义 URL |
+| 2 | 开启实时通道后能发现不在任何静态目录中的 `topic:dsh-plugin` 插件,并正确过滤噪声 | ⚠️ 实现完成 + 降噪单测覆盖(4 项);**端到端受限**:本机 `api.github.com` 不可达(需代理),未能实抓搜索结果 |
+| 3 | 某源不可达/离线时降级为 last-good 缓存,不阻塞其余源 | ✅ 单测 `unreachable_source_falls_back_to_last_good_cache`(无缓存时如实报错);JoinSet 并发 + 单源失败仅告警,不阻塞其余源 |
+| 4 | 未验证来源有明确标识与安装确认;绝不误装 `@deepseek-ai/*` 核心包 | ✅ 市场红色可信度标签 + 向导警告横幅 + 勾选后方可提交;后端 `drop_core_packages` 前置过滤,单测 `core_packages_are_never_market_entries` / `core_packages_are_dropped_from_a_source_listing` |
+| 5 | 单测覆盖:适配器解析、降噪过滤、去重分层、TTL 缓存 | ✅ `cargo test --lib` 131 passed;新增 15 项(适配器解析 ×2、降噪 ×2、去重分层 ×2、核心包 ×2、TTL/last-good ×2、env 解析、repo 归一化 ×2、缓存降级)|
 
 ---
 
@@ -321,8 +325,10 @@ pub struct PluginSourceConfig {
 
 ## 7. 风险 / 开放问题
 
-- GitHub search 限流(~30/min)与代理可达性(Launcher 全部 HTTP 走 `proxy::apply`)—— 需页级预算 + 退避 + last-good。
-- 代码搜索 API 需鉴权 token → 列为阶段 4 可选。
-- 第三方目录的许可与归属 → 保留 `sources` 归属字段。
+- GitHub search 限流(~30/min)与代理可达性(Launcher 全部 HTTP 走 `proxy::apply`)—— 已做页级预算(2 页 × 100)+ 三次指数退避 + last-good;**实测本机 `api.github.com` 不可达**,故 topic 通道默认关闭、需用户开启并保证代理可用。
+- **jsDelivr 单点依赖(新增风险)**:dshget 默认源与 topic 探测都改走 `cdn.jsdelivr.net`。若该 CDN 在用户网络不可达,dshget 会降级为 last-good 缓存(首次运行则无缓存 → 仅剩 2 源)。缓解:用户可在设置页改回 `raw.githubusercontent.com` 或自建镜像;last-good 缓存保证已成功拉取过的用户不受影响。
+- 代码搜索 API 需鉴权 token → 阶段 4 可选,本轮未实现。
+- 第三方目录的许可与归属 → 保留 `sources` 归属字段(已实现,含 dshget 上游 `sources[]` 透传)。
 - `plugin.dshx.dev` 无公开 JSON API(Nuxt SSR),暂不接入。
-- `PluginSource` 目前是封闭 enum,新增来源/自定义源需评估是否改为「已知枚举 + `custom:<id>` 字符串」以兼容用户自定义 id。
+- `PluginSource` 已由封闭 enum 改为**字符串源 id**,自定义源(含镜像)天然支持,无需 `custom:` 前缀解析。
+- topic 探测(`package.json` / `cordis.patch.yml`)对未按名命名的仓库存在**漏收**(探测预算 30 用尽后的候选被跳过并记日志),这是有意的限流取舍。

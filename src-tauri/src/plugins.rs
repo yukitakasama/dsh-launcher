@@ -854,6 +854,20 @@ fn is_core_package(id: &str) -> bool {
     }
 }
 
+/// Drops core packages from one source's listing, logging each drop.
+fn drop_core_packages(src_id: &str, list: Vec<MarketPlugin>) -> Vec<MarketPlugin> {
+    list.into_iter()
+        .filter(|p| {
+            if is_core_package(&p.id) {
+                crate::log_warn!("插件源「{src_id}」返回核心包「{}」，已丢弃", p.id);
+                false
+            } else {
+                true
+            }
+        })
+        .collect()
+}
+
 fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {
         (Some(x), Some(y)) => Some(x.max(y)),
@@ -952,22 +966,7 @@ async fn fetch_market_impl(
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((src, Ok(list))) => {
-                let list: Vec<MarketPlugin> = list
-                    .into_iter()
-                    .filter(|p| {
-                        if is_core_package(&p.id) {
-                            crate::log_warn!(
-                                "插件源「{}」返回核心包「{}」，已丢弃",
-                                src.id,
-                                p.id
-                            );
-                            false
-                        } else {
-                            true
-                        }
-                    })
-                    .collect();
-                collected.push((src.order, list));
+                collected.push((src.order, drop_core_packages(&src.id, list)));
             }
             Ok((src, Err(e))) => crate::log_warn!("插件源「{}」获取失败，忽略: {e}", src.id),
             Err(e) => crate::log_warn!("插件源任务异常: {e}"),
@@ -3640,6 +3639,39 @@ mod tests {
         assert!(topic_denied("omdsh-dev/dsh-hub-workshop"));
         assert!(!topic_denied("someone/dsh-memory"));
         assert!(!topic_denied("deepseek-ai-fan/dsh-tool"));
+    }
+
+    #[test]
+    fn core_packages_are_dropped_from_a_source_listing() {
+        let list = vec![
+            entry("@deepseek-ai/dsh", "core-npm"),
+            entry("github:deepseek-ai/dsh", "core-git"),
+            entry("github:someone/dsh-tool", "ok"),
+        ];
+        let kept = drop_core_packages("test", list);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "github:someone/dsh-tool");
+    }
+
+    #[tokio::test]
+    async fn unreachable_source_falls_back_to_last_good_cache() {
+        let dir = std::env::temp_dir().join(format!("dsh-plugins-cache-{}", uuid::Uuid::new_v4()));
+        let mut s = src("dshget", SourceKind::DshGet, Confidence::Aggregated, 2);
+        // Port 1 refuses connections immediately, so this fails fast offline.
+        s.url = "http://127.0.0.1:1/catalog.json".to_string();
+        let cached = vec![entry("github:o/r", "from-cache")];
+        write_source_cache(&dir, &s.id, &cached);
+
+        let got = fetch_source(&s, Some(&dir))
+            .await
+            .expect("an unreachable source must degrade to its last-good cache");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "from-cache");
+
+        // With no cache, the failure is surfaced (the caller logs and skips it).
+        let empty_dir = dir.join("empty");
+        assert!(fetch_source(&s, Some(&empty_dir)).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
