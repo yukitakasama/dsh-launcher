@@ -293,6 +293,8 @@ pub struct PluginSourceConfig {
       `live_fetch_plugin_versions`;市场半边新增「每源必须贡献」硬断言
       —— 原先源失败只 `log_warn!` 静默跳过,无任何断言能发现
 - [x] 全套 CI 门禁本地复跑通过(见 §6 第 6 行)
+- [x] 推送 `feat/46-plugin-sources` + 开 PR #47;修掉 CI 首轮暴露的**环境依赖测试**
+      (`stale_topic_cache_*` 把「离线」写进断言),复推后 **CI 4/4 通过**(见 §6 第 7 行)
 
 ---
 
@@ -338,14 +340,19 @@ topic 默认关闭)对冲,未超预算。
 | 4 | 阶段 2/3 前端 | worker(并行子代理) | types/api mock/store/Market/Settings/InstallWizard/VersionPick + i18n 双语;主 agent 复核并补:源编辑后失效 `pluginSourcesLoadedAt` 缓存、mock topic id 对齐真实 `github:<owner>/<repo>` 形态、探测加 8s 超时 | ✅ 完成(`vue-tsc --noEmit` 0 错,`vite build` ✓ 13.87s) |
 | 5 | 阶段 6 前端复核缺陷 | 主 agent | 复核后端契约后修 4 处:`github-topic` 源空 URL 被前端校验挡住(与 `sanitize_plugin_sources` 不一致)、源增删/排序/开关无互斥(连续点击互相覆盖)、`patchSettings` 吞错导致添加失败仍清空表单、`confidence` 缺失被当可信(向导免确认 + 无标签)。另:过滤 id 悬空清零、下拉只列启用源、mock 改读真实 settings | ✅ 完成 → 提交 `60595b1`(`vue-tsc` 0 错、`vite build` ✓ 10.5s) |
 | 6 | 阶段 6 CI 门禁 + 验收补强 | 主 agent | **发现 CI 本就失败**:`cargo fmt --check` 与 `clippy -D warnings` 在前几轮后端改动中已破(未格式化宏/断言 + `migrate.rs` 一处 `unnecessary_to_owned`),PR 无法过 CI → 修复 → 提交 `d245626`。拆分 live 冒烟测试为 `live_fetch_market`(不碰 `api.github.com`,可离线跑,新增「每源必须贡献」硬断言)+ `live_fetch_plugin_versions` → 提交 `83c14ef` | ✅ 完成:fmt/clippy/`cargo test --workspace`/`vue-tsc`/`vite build` **五项全绿**;`live_fetch_market` 实测三源均贡献、零核心包 |
+| 7 | 阶段 6 PR + CI 回归 | 主 agent | 推送 `feat/46-plugin-sources` 并开 PR [#47](https://github.com/dsh-plugins/dsh-launcher/pull/47)。**首次 CI 三平台全挂**:`stale_topic_cache_is_refetched_instead_of_served` 断言的是「过期缓存走 last-good 返回 stale 条目」——该分支只在网络失败时成立,本机 `api.github.com` 不可达故本地一直通过,CI runner 网络可达时 `fetch_catalog` 成功返回线上目录,断言即失败(**环境依赖测试,非 flake**)。改为对两个方向都断言真实契约(刷新成功→缓存被重写;刷新失败→文件未改写且旧载荷作 last-good),均由读回磁盘验证 → 提交 `b0f7bfa` | ✅ 完成:复推后 **CI 4/4 通过**(Quality linux/macos/windows + Integration checks)|
 
-> 提交序列(分支 `feat/relocatable-data-dir`,基线 `3a802ae`):
+> 提交序列(分支 `feat/46-plugin-sources`,基线 `3a802ae`):
 > `fe68db6` 阶段0/1 文档 → `8abdb30` 后端多源注册表 → `278ae71` 前端多源市场 →
 > `85e78bc` 阶段5 验收回填 → `fe67ecb` 后端复核 5 处修复 → `60595b1` 前端复核修复 →
-> `d245626` CI 门禁修复 → `83c14ef` live 测试拆分。
+> `d245626` CI 门禁修复 → `83c14ef` live 测试拆分 → `fafbcb8` 阶段6 文档回填 →
+> `b0f7bfa` topic 缓存测试去环境依赖。
 
-> 待办(未在本轮执行,需用户决定):推送到 `fork`(`https://github.com/yukitakasama/dsh-launcher.git`)
-> 并向上游 `dsh-plugins/dsh-launcher` 提 PR —— 按工作约定,未经用户明确要求不 push / 不提 PR。
+> **已提 PR**:[dsh-plugins/dsh-launcher#47](https://github.com/dsh-plugins/dsh-launcher/pull/47)
+> (`feat/46-plugin-sources` → `main`)。首轮 CI 三平台全挂的原因见第 7 行;修复后
+> **CI 4/4 通过**(Quality linux / macos / windows + Integration checks)。
+> 分支基于 PR [#44](https://github.com/dsh-plugins/dsh-launcher/pull/44)(issue #43)的
+> 8 个提交构建,故 PR #47 当前显示 16 个提交;#43 合入 main 后会自动只显示 #46 增量。
 
 ---
 
@@ -368,3 +375,11 @@ topic 默认关闭)对冲,未超预算。
   暂存「格式修复子集」时,`-U1` 上下文太短,git 把格式 hunk 与相邻的自有改动合并成一个 hunk,
   `--recount` 无法还原 → 一处格式修复被静默漏进提交,最终工作树却是干净的(fmt 通过)从而掩盖问题。
   仅靠在提交态 **隔离复跑** `cargo fmt --check` 才发现(plugins.rs:4237)。已 amend 修正。
+- **环境依赖测试只在 CI 暴露(PR #47 首轮 CI 三平台全挂)**:`stale_topic_cache_is_refetched_instead_of_served`
+  断言「过期缓存走 last-good 返回 `github:stale/x`」——那条路径**只在网络失败时成立**。
+  本机 `api.github.com` 不可达,所以本地一直绿;CI runner 网络可达,`fetch_catalog`
+  成功返回线上目录,断言立刻失败。**这是环境依赖测试,不是 flake**。
+  教训:凡是断言「网络失败后如何」的测试,必须要么标记 `#[ignore]`(联网冒烟),
+  要么对**两个方向**都断言(成功→缓存被重写;失败→文件未改写),或改用**必然失败**
+  的端点(如 `http://127.0.0.1:1/...`,连接立即被拒,与主机网络无关)。
+  已由 `b0f7bfa` 按「两个方向都断言」修正,复推后 CI 4/4 通过。
