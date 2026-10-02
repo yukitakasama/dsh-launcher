@@ -373,6 +373,7 @@ pub fn run() {
             providers::set_credential_ref,
             providers::delete_credential_ref,
             providers::check_provider_routes,
+            providers::provider_advanced_schemas,
             commands::get_settings,
             commands::update_settings,
             commands::fetch_news,

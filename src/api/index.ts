@@ -26,6 +26,7 @@ import type {
   NewInstanceInput,
   ProviderRoute,
   ProviderRouteList,
+  ProviderAdvancedFieldSchema,
   CredentialRefList,
   ProviderRouteReport,
   RepoSkillInfo,
@@ -1691,8 +1692,19 @@ export const api = {
     route: ProviderRoute,
     originalRoute: string | null,
     expectedHash: string,
+    removedExtraKeys: string[] = [],
   ) =>
-    call<ProviderRouteList>('save_provider_route', { homeId, profile, route, originalRoute, expectedHash }),
+    call<ProviderRouteList>('save_provider_route', {
+      homeId,
+      profile,
+      route,
+      originalRoute,
+      expectedHash,
+      removedExtraKeys: removedExtraKeys.length ? removedExtraKeys : null,
+    }),
+  /** Advanced-field schemas driving the provider editor (issue #85). */
+  providerAdvancedSchemas: () =>
+    call<ProviderAdvancedFieldSchema[]>('provider_advanced_schemas', {}),
   /** Deletes one provider route; other patch entries are untouched. */
   deleteProviderRoute: (homeId: string, profile: string, route: string, expectedHash: string) =>
     call<ProviderRouteList>('delete_provider_route', { homeId, profile, route, expectedHash }),

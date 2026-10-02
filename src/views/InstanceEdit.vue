@@ -19,6 +19,7 @@ import type {
   McpServer,
   McpTransport,
   PluginUpdateInfo,
+  ProviderAdvancedFieldSchema,
   ProviderRoute,
   ProviderRouteReport,
   SkillInfo,
@@ -1280,13 +1281,137 @@ const providerFormValid = computed(
     providerForm.value.models.every((_, idx) => !providerModelIdError(idx)),
 )
 
-/** Names listed in the dialog's preserved-config notice. */
-const providerExtraKeys = computed(() => Object.keys(providerForm.value.extra ?? {}))
+// --- Advanced fields (issue #85) ----------------------------------------------
+
+/** One editable advanced field row; the JSON text is the editing surface. */
+interface ProviderAdvancedRow {
+  key: string
+  /** Schema-known field (gets its own description) vs. a preserved extra key. */
+  known: boolean
+  kind: string
+  descKey: string
+  /** Raw JSON; empty string means "not set" (the field is omitted). */
+  text: string
+  valid: boolean
+}
+
+const providerAdvancedSchemas = ref<ProviderAdvancedFieldSchema[]>([])
+const providerAdvancedRows = ref<ProviderAdvancedRow[]>([])
+/** Extra keys the route had when the dialog opened; keys that disappear from
+ * the rows are passed to the backend as removed so the replaced route's
+ * round-trip does not resurrect them. */
+const providerOriginalExtraKeys = ref<Set<string>>(new Set())
+const providerAdvancedAddKey = ref('')
+
+function ensureProviderAdvancedSchemas() {
+  if (providerAdvancedSchemas.value.length) return
+  api
+    .providerAdvancedSchemas()
+    .then((schemas) => {
+      providerAdvancedSchemas.value = schemas
+      if (providerEditVisible.value) rebuildProviderAdvancedRows()
+    })
+    .catch(() => {})
+}
+
+function providerRowValid(row: Pick<ProviderAdvancedRow, 'kind' | 'text'>): boolean {
+  if (!row.text.trim()) return true
+  let value: unknown
+  try {
+    value = JSON.parse(row.text)
+  } catch {
+    return false
+  }
+  if (row.kind === 'object') {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+  }
+  return true
+}
+
+/** Rebuilds the advanced rows from the form's current extra map: every
+ * schema field (set or not) first, then the remaining preserved keys. */
+function rebuildProviderAdvancedRows() {
+  const extra = providerForm.value.extra ?? {}
+  const rows: ProviderAdvancedRow[] = []
+  const covered = new Set<string>()
+  for (const schema of providerAdvancedSchemas.value) {
+    covered.add(schema.key)
+    const value = extra[schema.key]
+    rows.push({
+      key: schema.key,
+      known: true,
+      kind: schema.kind,
+      descKey: schema.descKey,
+      text: value === undefined ? '' : JSON.stringify(value, null, 2),
+      valid: true,
+    })
+  }
+  for (const [key, value] of Object.entries(extra)) {
+    if (covered.has(key)) continue
+    rows.push({
+      key,
+      known: false,
+      kind: 'any',
+      descKey: '',
+      text: JSON.stringify(value, null, 2),
+      valid: true,
+    })
+  }
+  providerAdvancedRows.value = rows
+}
+
+const providerAdvancedValid = computed(() => providerAdvancedRows.value.every((r) => r.valid))
+
+/** Schema keys (plus anything typed via allow-create) not yet on the form. */
+const providerAdvancedAddOptions = computed(() =>
+  providerAdvancedSchemas.value
+    .filter((s) => !providerAdvancedRows.value.some((r) => r.key === s.key))
+    .map((s) => ({ label: s.key, value: s.key })),
+)
+
+/** Removes a row; an originally present key is reported as removed on save. */
+function removeProviderAdvancedRow(row: ProviderAdvancedRow) {
+  providerAdvancedRows.value = providerAdvancedRows.value.filter((r) => r.key !== row.key)
+  if (row.known) providerAdvancedAddKey.value = row.key
+}
+
+function addProviderAdvancedRow() {
+  const key = providerAdvancedAddKey.value.trim()
+  if (!key || providerAdvancedRows.value.some((r) => r.key === key)) return
+  if (providerOriginalRoute.value && providerOriginalExtraKeys.value.has(key)) {
+    // Re-adding a removed key: keep it out of the removed report.
+    providerOriginalExtraKeys.value.delete(key)
+  }
+  const schema = providerAdvancedSchemas.value.find((s) => s.key === key)
+  providerAdvancedRows.value.push({
+    key,
+    known: Boolean(schema),
+    kind: schema?.kind ?? 'any',
+    descKey: schema?.descKey ?? '',
+    text: '{}',
+    valid: true,
+  })
+  providerAdvancedAddKey.value = ''
+}
+
+/** Writes the rows back into `form.extra`; returns null when any is invalid. */
+function applyProviderAdvancedRows(): Record<string, unknown> | null {
+  if (!providerAdvancedValid.value) return null
+  const extra: Record<string, unknown> = {}
+  for (const row of providerAdvancedRows.value) {
+    if (!row.text.trim()) continue
+    extra[row.key] = JSON.parse(row.text)
+  }
+  return extra
+}
 
 function openProviderCreate() {
   providerOriginalRoute.value = ''
   providerForm.value = emptyProviderForm()
   onProviderPresetChange('deepseek')
+  ensureProviderAdvancedSchemas()
+  providerOriginalExtraKeys.value = new Set()
+  rebuildProviderAdvancedRows()
   providerEditVisible.value = true
 }
 
@@ -1309,6 +1434,9 @@ function openProviderEdit(route: ProviderRoute) {
     })),
     extra: { ...(route.extra ?? {}) },
   }
+  ensureProviderAdvancedSchemas()
+  providerOriginalExtraKeys.value = new Set(Object.keys(route.extra ?? {}))
+  rebuildProviderAdvancedRows()
   providerEditVisible.value = true
 }
 
@@ -1362,6 +1490,18 @@ async function onSaveProviderRoute() {
     return
   }
   const envName = providerEnvName.value
+  const advancedExtra = applyProviderAdvancedRows()
+  if (advancedExtra === null) {
+    Message.warning(t('instanceEdit.providerAdvancedInvalid'))
+    return
+  }
+  providerForm.value.extra = advancedExtra
+  // Keys that were on the route when the dialog opened and are gone now were
+  // deleted through the advanced editor — report them so the backend's
+  // round-trip carry-over does not resurrect them.
+  const removedExtraKeys = [...providerOriginalExtraKeys.value].filter(
+    (key) => !(key in advancedExtra),
+  )
   const route = providerPayload(providerForm.value, envName)
   providerSaving.value = true
   try {
@@ -1388,6 +1528,7 @@ async function onSaveProviderRoute() {
       route,
       providerOriginalRoute.value || null,
       providerHash.value,
+      removedExtraKeys,
     )
     providerRoutes.value = list.routes
     providerHash.value = list.hash
@@ -3270,9 +3411,50 @@ const terminalRunning = ref(false)
           </div>
         </a-form-item>
 
-        <a-alert v-if="providerExtraKeys.length" type="info">
-          {{ t('instanceEdit.providerExtraKept', { keys: providerExtraKeys.join(', ') }) }}
-        </a-alert>
+        <!-- Advanced fields (issue #85): schema-known fields plus any
+             preserved extra key, edited as JSON, collapsed by default. -->
+        <a-collapse :default-active-key="[]" class="provider-advanced-collapse">
+          <a-collapse-item key="advanced" :header="t('instanceEdit.providerAdvancedTitle')">
+            <div class="mcp-rows">
+              <div v-for="row in providerAdvancedRows" :key="row.key" class="provider-advanced-row">
+                <div class="provider-advanced-head">
+                  <span class="provider-advanced-key">{{ row.key }}</span>
+                  <span v-if="row.known" class="provider-advanced-desc">
+                    {{ t('instanceEdit.providerAdvancedDesc.' + row.descKey) }}
+                  </span>
+                  <span v-else class="provider-advanced-desc">
+                    {{ t('instanceEdit.providerAdvancedCustom') }}
+                  </span>
+                  <a-button size="mini" type="text" status="danger" @click="removeProviderAdvancedRow(row)">
+                    {{ t('instanceEdit.providerAdvancedRemove') }}
+                  </a-button>
+                </div>
+                <a-textarea
+                  v-model="row.text"
+                  :auto-size="{ minRows: 2, maxRows: 10 }"
+                  :placeholder="t('instanceEdit.providerAdvancedPlaceholder')"
+                  :status="row.valid ? undefined : 'error'"
+                />
+                <div v-if="!row.valid" class="provider-advanced-error">
+                  {{ t('instanceEdit.providerAdvancedInvalid') }}
+                </div>
+              </div>
+              <div class="provider-advanced-add">
+                <a-select
+                  v-model="providerAdvancedAddKey"
+                  allow-create
+                  allow-clear
+                  :placeholder="t('instanceEdit.providerAdvancedAddPlaceholder')"
+                  :options="providerAdvancedAddOptions"
+                  class="provider-advanced-add-select"
+                />
+                <a-button size="small" :disabled="!providerAdvancedAddKey.trim()" @click="addProviderAdvancedRow">
+                  {{ t('instanceEdit.providerAdvancedAdd') }}
+                </a-button>
+              </div>
+            </div>
+          </a-collapse-item>
+        </a-collapse>
       </a-form>
     </a-modal>
 
@@ -3473,6 +3655,45 @@ const terminalRunning = ref(false)
   gap: 8px;
   align-items: center;
   margin-bottom: 8px;
+}
+
+.provider-advanced-row {
+  margin-bottom: 12px;
+}
+
+.provider-advanced-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+
+.provider-advanced-key {
+  font-family: monospace;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.provider-advanced-desc {
+  flex: 1;
+  color: var(--color-text-3);
+  font-size: 12px;
+}
+
+.provider-advanced-error {
+  color: rgb(var(--danger-6));
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.provider-advanced-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.provider-advanced-add-select {
+  width: 240px;
 }
 
 .provider-model-id {

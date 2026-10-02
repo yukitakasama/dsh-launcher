@@ -492,6 +492,17 @@ export interface ProviderRouteList {
   hash: string
 }
 
+/** Schema of one advanced route field the editor surfaces (issue #85). */
+export interface ProviderAdvancedFieldSchema {
+  /** Route-profile key, e.g. `compat`. */
+  key: string
+  /** Value kind: `object` | `scalar`. */
+  kind: string
+  /** i18n key suffix under `instanceEdit.providerAdvancedDesc.`. */
+  descKey: string
+}
+
+
 /** One credential-store ref, masked for display. */
 export interface CredentialRefInfo {
   name: string

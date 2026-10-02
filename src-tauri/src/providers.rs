@@ -178,6 +178,40 @@ pub struct ProviderRouteReport {
     pub checks: Vec<ProviderCheckItem>,
 }
 
+/// Schema of one advanced route field surfaced by the settings editor
+/// (issue #85). The table drives the frontend — adding an entry here makes
+/// the field editable without any UI change; unknown extra keys still
+/// round-trip untouched (issue #76 preservation semantics).
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvancedFieldSchema {
+    /// Route-profile key, e.g. `compat`.
+    pub key: &'static str,
+    /// Value kind: `object` (a mapping) or `scalar`.
+    pub kind: &'static str,
+    /// i18n key suffix under `instanceEdit.providerAdvancedDesc.`.
+    pub desc_key: &'static str,
+}
+
+/// The advanced route fields the editor knows about, in display order.
+pub const ADVANCED_FIELD_SCHEMAS: &[AdvancedFieldSchema] = &[
+    AdvancedFieldSchema {
+        key: "compat",
+        kind: "object",
+        desc_key: "compat",
+    },
+    AdvancedFieldSchema {
+        key: "modelOverrides",
+        kind: "object",
+        desc_key: "modelOverrides",
+    },
+    AdvancedFieldSchema {
+        key: "retryPolicy",
+        kind: "object",
+        desc_key: "retryPolicy",
+    },
+];
+
 // ---------------------------------------------------------------------------
 // Shared text helpers (same conventions as mcp.rs)
 // ---------------------------------------------------------------------------
@@ -515,6 +549,31 @@ pub fn validate_route(
         }
         if !seen.insert(model.id.clone()) {
             return Err(format!("模型 id 重复: {}", model.id));
+        }
+    }
+    Ok(())
+}
+
+/// Validates one advanced (extra) field of a route before it is written
+/// (issue #85). Schema-known fields are shape-checked; unknown keys keep the
+/// issue #76 preservation semantics and only need to survive YAML
+/// serialization. Managed keys can never enter `extra`.
+pub fn validate_advanced_field(key: &str, value: &serde_json::Value) -> Result<(), String> {
+    if key.trim().is_empty() {
+        return Err("高级字段名不能为空".to_string());
+    }
+    if key.trim() != key {
+        return Err(format!("高级字段名不能以空白开头或结尾: {key}"));
+    }
+    if MANAGED_ROUTE_KEYS.contains(&key) {
+        return Err(format!("「{key}」由表单管理，不能作为高级字段写入"));
+    }
+    let Some(schema) = ADVANCED_FIELD_SCHEMAS.iter().find(|s| s.key == key) else {
+        return Ok(());
+    };
+    if schema.kind == "object" {
+        if !value.is_object() {
+            return Err(format!("高级字段「{key}」需为对象（mapping）形式"));
         }
     }
     Ok(())
@@ -1174,7 +1233,10 @@ pub fn list_provider_routes(
 
 /// Creates or updates one provider route; `original_route` names the route
 /// being edited (a rename deletes the old block). Validation failures return
-/// before any write. Resolves to the routes as re-read from the written text.
+/// before any write. `removed_extra_keys` names advanced fields (issue #85)
+/// the editor explicitly deleted: without it they would be carried over from
+/// the route being replaced. Resolves to the routes as re-read from the
+/// written text.
 #[tauri::command]
 pub fn save_provider_route(
     state: State<'_, AppState>,
@@ -1183,6 +1245,7 @@ pub fn save_provider_route(
     route: ProviderRoute,
     original_route: Option<String>,
     expected_hash: String,
+    removed_extra_keys: Option<Vec<String>>,
 ) -> Result<ProviderRouteList, String> {
     let home = home_path_of(&state, &home_id)?;
     let path = profile_patch_path(&home, &profile)?;
@@ -1205,11 +1268,19 @@ pub fn save_provider_route(
     let mut next = route;
     normalize(&mut next);
     validate_route(&next, &others, original)?;
+    for (key, value) in &next.extra {
+        validate_advanced_field(key, value)?;
+    }
 
-    // Carry over the unmanaged keys of the route being replaced.
+    // Carry over the unmanaged keys of the route being replaced, minus the
+    // keys the editor explicitly removed.
+    let removed = removed_extra_keys.unwrap_or_default();
     if let Some(orig) = original {
         if let Some(old) = routes.iter().find(|r| r.route == orig) {
             for (key, value) in &old.extra {
+                if removed.contains(key) {
+                    continue;
+                }
                 next.extra
                     .entry(key.clone())
                     .or_insert_with(|| value.clone());
@@ -1504,6 +1575,14 @@ pub fn check_provider_routes(
         });
     }
     Ok(reports)
+}
+
+/// The advanced-field schemas driving the settings editor (issue #85).
+/// Adding an entry to [`ADVANCED_FIELD_SCHEMAS`] makes the new field editable
+/// without any frontend change.
+#[tauri::command]
+pub fn provider_advanced_schemas() -> Vec<AdvancedFieldSchema> {
+    ADVANCED_FIELD_SCHEMAS.to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -2005,5 +2084,94 @@ refs:
         assert!(!is_loopback_http("http://127.evil.com"));
         assert!(!is_loopback_http("http://192.168.1.10"));
         assert!(!is_loopback_http("https://localhost"));
+    }
+
+    // -- issue #85: advanced field editor -----------------------------------
+
+    fn json_obj(pairs: &[(&str, serde_json::Value)]) -> serde_json::Value {
+        serde_json::Value::Object(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+    }
+
+    #[test]
+    fn advanced_schema_table_shape() {
+        assert_eq!(ADVANCED_FIELD_SCHEMAS.len(), 3);
+        for schema in ADVANCED_FIELD_SCHEMAS {
+            assert!(!MANAGED_ROUTE_KEYS.contains(&schema.key));
+            assert_eq!(schema.kind, "object");
+        }
+        let keys: Vec<&str> = ADVANCED_FIELD_SCHEMAS.iter().map(|s| s.key).collect();
+        assert_eq!(keys, ["compat", "modelOverrides", "retryPolicy"]);
+    }
+
+    #[test]
+    fn advanced_field_validation() {
+        // Known object fields demand a mapping.
+        assert!(validate_advanced_field("compat", &json_obj(&[("a", 1.into())])).is_ok());
+        assert!(validate_advanced_field("retryPolicy", &serde_json::json!("oops")).is_err());
+        assert!(validate_advanced_field("modelOverrides", &serde_json::json!(null)).is_err());
+        // Managed keys can never enter extra.
+        assert!(validate_advanced_field("baseURL", &json_obj(&[])).is_err());
+        // Unknown keys keep the #76 preservation semantics.
+        assert!(validate_advanced_field("timeoutMs", &serde_json::json!(30000)).is_ok());
+        // Blank or padded names are rejected.
+        assert!(validate_advanced_field("  ", &json_obj(&[])).is_err());
+        assert!(validate_advanced_field(" x", &json_obj(&[])).is_err());
+    }
+
+    #[test]
+    fn splice_writes_advanced_fields_and_round_trips() {
+        let mut route = custom_route("my-gateway");
+        route.extra.insert(
+            "compat".to_string(),
+            json_obj(&[("responsesApi", serde_json::json!(true))]),
+        );
+        route.extra.insert(
+            "retryPolicy".to_string(),
+            json_obj(&[
+                ("maxRetries", serde_json::json!(3)),
+                ("backoffMs", serde_json::json!(500)),
+            ]),
+        );
+        let text = splice_route(SAMPLE, &route, None).unwrap();
+        // Comments and sibling entries survive the splice.
+        assert!(text.contains("# Your patch layer"));
+        assert!(text.contains("- id: agent-default-model"));
+        // The advanced fields round-trip.
+        let parsed = parse_provider_routes(&text).unwrap();
+        let written = parsed.iter().find(|r| r.route == "my-gateway").unwrap();
+        assert_eq!(written.extra.get("retryPolicy").unwrap()["maxRetries"], serde_json::json!(3));
+        assert_eq!(written.extra.get("compat").unwrap()["responsesApi"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn splice_removal_drops_deleted_advanced_field() {
+        // A route carrying an advanced field in the file; the editor deletes
+        // it and saves the route without the key — the block must not
+        // contain the key anymore.
+        let raw = SAMPLE.replace(
+            "        baseURL: https://ai.anvilcraft.dev",
+            "        baseURL: https://ai.anvilcraft.dev\n        retryPolicy:\n          maxRetries: 3",
+        );
+        let routes = parse_provider_routes(&raw).unwrap();
+        let first = &routes[0];
+        assert_eq!(first.extra.get("retryPolicy").unwrap()["maxRetries"], serde_json::json!(3));
+        let mut edited = first.clone();
+        edited.extra.remove("retryPolicy");
+        let text = splice_route(&raw, &edited, Some("anvilcraft-ai")).unwrap();
+        let reparsed = parse_provider_routes(&text).unwrap();
+        assert!(!reparsed[0].extra.contains_key("retryPolicy"));
+        // The sibling route is untouched.
+        assert!(text.contains("mclans-ai:"));
+    }
+
+    #[test]
+    fn extra_with_inline_flow_route_still_refused() {
+        // Editing the advanced fields of a route that lives inside a
+        // hand-written inline-flow providers dict must be refused.
+        let raw = "- id: llm-pi-ai\n  name: '@deepseek-ai/dsh-llm-pi-ai'\n  config:\n    providers: {old: {displayName: Old}}\n";
+        let mut route = custom_route("old");
+        route.extra.insert("compat".to_string(), json_obj(&[]));
+        let err = splice_route(raw, &route, Some("old")).unwrap_err();
+        assert!(err.contains("内联 flow"));
     }
 }

@@ -651,6 +651,18 @@
     "providerModelMaxTokens": "最大输出",
     "providerModelVision": "图像输入",
     "providerExtraKept": "本表单未呈现的配置项，保存时按原值保留：{keys}",
+    "providerAdvancedTitle": "高级字段（compat / modelOverrides / retryPolicy 等）",
+    "providerAdvancedDesc": {
+      "compat": "协议兼容性开关（如 responsesApi 等），对象形式",
+      "modelOverrides": "路由级模型覆写，键为模型 id，对象形式",
+      "retryPolicy": "重试策略（次数、退避等），对象形式"
+    },
+    "providerAdvancedCustom": "表单未识别的保留字段，按 JSON 编辑",
+    "providerAdvancedPlaceholder": "未设置（留空保存时不写出该字段）；填写 JSON 对象",
+    "providerAdvancedRemove": "删除",
+    "providerAdvancedAdd": "添加字段",
+    "providerAdvancedAddPlaceholder": "选择或输入字段名",
+    "providerAdvancedInvalid": "内容需为合法的 JSON 对象",
     "providerErrRouteRequired": "请填写路由 ID",
     "providerErrRoutePattern": "路由 ID 需以小写字母开头，只能包含小写字母、数字、下划线，且不能以下划线结尾（不超过 64 个字符）",
     "providerErrRouteDuplicated": "该 Profile 下已存在同名路由",

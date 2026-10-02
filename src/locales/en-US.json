@@ -651,6 +651,18 @@
     "providerModelMaxTokens": "Max output",
     "providerModelVision": "Image input",
     "providerExtraKept": "Settings this form does not surface are kept as-is on save: {keys}",
+    "providerAdvancedTitle": "Advanced fields (compat / modelOverrides / retryPolicy, …)",
+    "providerAdvancedDesc": {
+      "compat": "Protocol compatibility switches (e.g. responsesApi), object form",
+      "modelOverrides": "Route-level model overrides, keyed by model id, object form",
+      "retryPolicy": "Retry policy (attempts, backoff, …), object form"
+    },
+    "providerAdvancedCustom": "Preserved key the form does not recognize, edit as JSON",
+    "providerAdvancedPlaceholder": "Not set (left empty the key is omitted on save); enter a JSON object",
+    "providerAdvancedRemove": "Remove",
+    "providerAdvancedAdd": "Add field",
+    "providerAdvancedAddPlaceholder": "Pick or type a field name",
+    "providerAdvancedInvalid": "Content must be a valid JSON object",
     "providerErrRouteRequired": "Please enter a route ID",
     "providerErrRoutePattern": "Route IDs start with a lowercase letter, may contain only lowercase letters, digits and underscores, and must not end on an underscore (max 64 chars)",
     "providerErrRouteDuplicated": "A route with this name already exists in this profile",
