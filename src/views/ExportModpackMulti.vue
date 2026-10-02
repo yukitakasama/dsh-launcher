@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
-import type { ExportContents, ExportProfileSpec } from '@/api/types'
+import type { ExportContents, ExportProfileSpec, ProviderRoute } from '@/api/types'
 import { useLauncherStore } from '@/stores/launcher'
 import HintIcon from '@/components/HintIcon.vue'
 
@@ -24,6 +24,11 @@ const busy = ref(false)
 
 /** Per-profile content selection, created on first expand. */
 const contentsMap = reactive<Record<string, ExportContents>>({})
+
+/** Per-profile provider route selection (issue #86): route names per
+ * profile, loaded lazily on first expand; default = all selected. */
+const providerRoutesMap = reactive<Record<string, ProviderRoute[]>>({})
+const providerSelectedMap = reactive<Record<string, string[]>>({})
 
 /** Internal entries never listed at all. */
 const EXCLUDED = new Set(['__temp__', 'node_modules'])
@@ -45,10 +50,22 @@ function contentsFor(p: string): ExportContents {
   return contentsMap[p]
 }
 
-function toggleExpand(p: string) {
+async function toggleExpand(p: string) {
   if (isBaseline(p)) return
   expanded.value = expanded.value === p ? null : p
   contentsFor(p)
+  if (providerRoutesMap[p] === undefined) {
+    providerRoutesMap[p] = []
+    providerSelectedMap[p] = []
+    try {
+      const list = await api.listProviderRoutes(ctx!.homeId, p)
+      providerRoutesMap[p] = list.routes
+      // Default: carry every route as a template (user can deselect).
+      providerSelectedMap[p] = list.routes.map((r) => r.route)
+    } catch {
+      // A profile without a readable patch layer carries no templates.
+    }
+  }
 }
 
 function setSelected(p: string, v: boolean | (string | number | boolean)[]) {
@@ -115,7 +132,10 @@ async function startExport() {
   if (!outFile) return
   const specs: ExportProfileSpec[] = selected.value.map((p) => ({
     profile: p,
-    contents: { ...contentsFor(p) },
+    contents: {
+      ...contentsFor(p),
+      providers: contentsFor(p).patch ? [...(providerSelectedMap[p] ?? [])] : [],
+    },
   }))
   busy.value = true
   try {
@@ -216,6 +236,30 @@ async function startExport() {
                 {{ t('exportPack.contentExtra') }}
                 <HintIcon :content="t('exportPack.contentExtraHint')" />
               </a-checkbox>
+            </div>
+            <div v-if="(providerRoutesMap[p] ?? []).length > 0" class="content-row">
+              <div class="provider-row-title">
+                <a-checkbox
+                  :model-value="providerSelectedMap[p].length === providerRoutesMap[p].length"
+                  :indeterminate="
+                    providerSelectedMap[p].length > 0 &&
+                    providerSelectedMap[p].length < providerRoutesMap[p].length
+                  "
+                  @change="
+                    (v: boolean | (string | number | boolean)[]) =>
+                      (providerSelectedMap[p] =
+                        v === true ? providerRoutesMap[p].map((r) => r.route) : [])
+                  "
+                >
+                  {{ t('exportPack.contentProviders') }}
+                </a-checkbox>
+                <HintIcon :content="t('exportPack.contentProvidersHint')" />
+              </div>
+              <a-checkbox-group v-model="providerSelectedMap[p]" class="provider-row-list">
+                <a-checkbox v-for="r in providerRoutesMap[p]" :key="r.route" :value="r.route">
+                  {{ r.displayName || r.route }}
+                </a-checkbox>
+              </a-checkbox-group>
             </div>
           </div>
         </div>
@@ -340,6 +384,17 @@ async function startExport() {
 
 .content-row {
   padding: 6px 4px;
+}
+
+.provider-row-title {
+  margin-bottom: 4px;
+}
+
+.provider-row-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 22px;
 }
 
 .form-row {

@@ -87,6 +87,12 @@ interface LauncherState {
   taskFlyTick: number
   /** Last failed launch (sync error or unexpected exit) for the error dialog. */
   launchError: { instanceId: string; message: string; exitCode: number | null } | null
+  /** issue #86: task id of the modpack import started from the import dialog;
+   * when that exact task finishes we offer the provider-template fill dialog. */
+  pendingImportTaskId: string | null
+  /** Set when a modpack import with provider templates finished (issue #86):
+   * the fill dialog opens for that instance and closes by clearing this. */
+  pendingProviderTemplateFill: { instanceId: string } | null
   loaded: boolean
 }
 
@@ -140,6 +146,8 @@ export const useLauncherStore = defineStore('launcher', {
     homeProfile: null,
     taskFlyTick: 0,
     launchError: null,
+    pendingImportTaskId: null,
+    pendingProviderTemplateFill: null,
     loaded: false,
   }),
 
@@ -246,6 +254,15 @@ export const useLauncherStore = defineStore('launcher', {
           this.refreshInstances()
           this.refreshVersions()
           this.refreshHomes()
+          // issue #86: if this finished import is the one we're tracking,
+          // surface the provider-template fill dialog. It closes quietly when
+          // nothing is pending.
+          if (this.pendingImportTaskId && p.id === this.pendingImportTaskId) {
+            this.pendingImportTaskId = null
+            if (p.instance_id) {
+              this.pendingProviderTemplateFill = { instanceId: p.instance_id }
+            }
+          }
         }
       })
 

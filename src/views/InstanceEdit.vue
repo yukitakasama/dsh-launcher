@@ -8,6 +8,7 @@ import type { CompatibilityReport as CompatibilityReportType } from '@/api/types
 import CompatibilityReport from '@/components/CompatibilityReport.vue'
 import { latestRequest } from '@/utils/latest-request'
 import { renderMarkdown } from '@/utils/markdown'
+import { routeToEnvName } from '@/utils/envName'
 import {
   providerCheckStatus,
   providerCheckStatusKeySuffix,
@@ -1201,17 +1202,6 @@ function onProviderPresetChange(value: unknown) {
     providerForm.value.route = preset.key
     if (!providerForm.value.displayName) providerForm.value.displayName = preset.key
   }
-}
-
-/** The credential ref derived from a route id: uppercased, sanitized,
- *  suffixed — `my_gw` becomes `MY_GW_API_KEY`. */
-function routeToEnvName(route: string): string {
-  const clean = route
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-  return clean ? `${clean}_API_KEY` : ''
 }
 
 /** The credential ref this form saves under: the stored key wins (editing),

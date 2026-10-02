@@ -31,6 +31,11 @@ const CREDENTIALS_FILENAME: &str = ".credentials.yaml";
 /// through `extra` untouched (`reasoning`, `headers`, `timeoutMs`, ...).
 const MANAGED_ROUTE_KEYS: [&str; 5] = ["displayName", "apiKeyEnv", "api", "baseURL", "models"];
 
+/// The `apiKeyEnv` a modpack-carried provider template ships with (issue
+/// #86): templates never carry secrets. The import fill dialog swaps this
+/// for a real env name once the user provides the key.
+pub const PROVIDER_TEMPLATE_PLACEHOLDER: &str = "DSH_TEMPLATE_API_KEY";
+
 /// Route names that resolve to a pi-ai built-in catalog provider (endpoint,
 /// protocol and model catalog inherited; from the pi-ai `providers/`
 /// registry). A route keying anything else is a full custom declaration.
@@ -989,6 +994,35 @@ pub fn splice_route_removal(raw: &str, route: &str) -> Result<String, String> {
         out.push('\n');
     }
     Ok(out)
+}
+
+/// Applies a batch of modpack-carried provider routes to a patch document
+/// (issue #86). Each route is normalized and validated against the routes
+/// already present; a name clash replaces the existing block (the template
+/// wins, matching the "apply template" semantics). Splicing reuses the same
+/// byte-safe engine as `save_provider_route`, and the final text must
+/// re-parse before it is returned.
+pub fn apply_routes_to_patch(raw: &str, routes: &[ProviderRoute]) -> Result<String, String> {
+    let mut text = raw.to_string();
+    for incoming in routes {
+        let mut route = incoming.clone();
+        normalize(&mut route);
+        let current = parse_provider_routes(&text)?;
+        let replaces = current
+            .iter()
+            .find(|r| r.route == route.route)
+            .map(|r| r.route.clone());
+        let others: Vec<ProviderRoute> = current
+            .iter()
+            .filter(|r| Some(r.route.as_str()) != replaces.as_deref())
+            .cloned()
+            .collect();
+        validate_route(&route, &others, replaces.as_deref())?;
+        text = splice_route(&text, &route, replaces.as_deref())?;
+    }
+    // Defense in depth: the final document must still parse.
+    parse_provider_routes(&text)?;
+    Ok(text)
 }
 
 // ---------------------------------------------------------------------------
@@ -2005,5 +2039,84 @@ refs:
         assert!(!is_loopback_http("http://127.evil.com"));
         assert!(!is_loopback_http("http://192.168.1.10"));
         assert!(!is_loopback_http("https://localhost"));
+    }
+
+    #[test]
+    fn apply_routes_creates_entry_in_empty_document() {
+        let text = apply_routes_to_patch("", &[custom_route("my_gateway")]).unwrap();
+        assert!(text.contains("- id: llm-pi-ai"));
+        assert!(text.contains("my_gateway:"));
+        let routes = parse_provider_routes(&text).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].api_key_env, "TEST_API_KEY");
+    }
+
+    #[test]
+    fn apply_routes_appends_and_preserves_comments_byte_for_byte() {
+        let comment_header = SAMPLE
+            .lines()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let before = parse_provider_routes(SAMPLE).unwrap();
+        let text = apply_routes_to_patch(
+            SAMPLE,
+            &[custom_route("my_gateway"), custom_route("second_gw")],
+        )
+        .unwrap();
+        // Header comments and every pre-existing route survive untouched.
+        assert!(text.starts_with(&comment_header));
+        for old in &before {
+            assert!(text.contains(&format!("{}:", old.route)));
+        }
+        assert!(text.contains("displayName: \" AnvilCraft AI\""));
+        assert!(text.contains("welcomeNoticeVersion: 2026-08-13.1"));
+        let routes = parse_provider_routes(&text).unwrap();
+        assert_eq!(routes.len(), 4);
+        assert!(routes.iter().any(|r| r.route == "second_gw"));
+    }
+
+    #[test]
+    fn apply_routes_replaces_existing_route_on_name_clash() {
+        let template = ProviderRoute {
+            route: "anvilcraft-ai".to_string(),
+            display_name: "Replaced".to_string(),
+            api_key_env: PROVIDER_TEMPLATE_PLACEHOLDER.to_string(),
+            api: "openai-completions".to_string(),
+            base_url: "https://replaced.example.com".to_string(),
+            models: Vec::new(),
+            extra: serde_json::Map::new(),
+            catalog: false,
+        };
+        let text = apply_routes_to_patch(SAMPLE, &[template]).unwrap();
+        let routes = parse_provider_routes(&text).unwrap();
+        assert_eq!(routes.len(), 2);
+        let replaced = routes.iter().find(|r| r.route == "anvilcraft-ai").unwrap();
+        assert_eq!(replaced.base_url, "https://replaced.example.com");
+        assert_eq!(replaced.api_key_env, PROVIDER_TEMPLATE_PLACEHOLDER);
+        // Untouched route survives.
+        assert!(routes.iter().any(|r| r.route == "mclans-ai"));
+    }
+
+    #[test]
+    fn apply_routes_rejects_invalid_template() {
+        // Custom route without baseURL must be refused.
+        let mut bad = custom_route("my_gateway");
+        bad.base_url = String::new();
+        let err = apply_routes_to_patch(SAMPLE, &[bad]).unwrap_err();
+        assert!(err.contains("baseURL"), "unexpected error: {err}");
+        // Duplicate model ids must be refused too.
+        let mut dup = custom_route("my_gateway");
+        dup.models = vec![
+            ProviderModel {
+                id: "m1".to_string(),
+                ..Default::default()
+            },
+            ProviderModel {
+                id: "m1".to_string(),
+                ..Default::default()
+            },
+        ];
+        assert!(apply_routes_to_patch(SAMPLE, &[dup]).is_err());
     }
 }

@@ -267,6 +267,8 @@ export interface ExportContents {
   agents_md?: boolean
   /** Selected on-disk skill entries under <home>/skills, shipped under home/skills/ (issue #58). */
   skills?: string[]
+  /** Provider route names carried as sanitized templates (issue #86); empty = none. */
+  providers?: string[]
 }
 
 /** Modpack export overrides; unset fields fall back to profile-derived defaults. */
@@ -296,6 +298,23 @@ export interface ModpackFileEntry {
   urls: string[]
 }
 
+/** The apiKeyEnv a modpack provider template ships with (issue #86): templates
+ * never carry secrets; the import fill dialog swaps this for a real env name. */
+export const PROVIDER_TEMPLATE_PLACEHOLDER = 'DSH_TEMPLATE_API_KEY'
+
+/** A provider template carried by a modpack manifest (issue #86). */
+export interface ModpackProviderTemplate {
+  route: string
+  displayName?: string
+  /** Always PROVIDER_TEMPLATE_PLACEHOLDER in a shipped pack. */
+  apiKeyEnv?: string
+  api?: string
+  baseURL?: string
+  models?: ProviderModel[]
+  /** v5 dshhome only: profile names the template applies to; empty = all. */
+  profiles?: string[]
+}
+
 /** Modpack manifest (v2/v3 legacy tgz, v4 inside .dspack); displayName/description may be a string or a locale map. */
 export interface ModpackManifest {
   manifestVersion: number
@@ -314,6 +333,8 @@ export interface ModpackManifest {
   patch?: string | null
   /** v4: heavy content download manifest. */
   files?: ModpackFileEntry[]
+  /** Provider route templates (issue #86); sanitized — apiKeyEnv is always the placeholder. */
+  providers?: ModpackProviderTemplate[]
   /** v5 dshhome form: default launch profile key. */
   defaultProfile?: string | null
   /** v5 dshhome form: profile name → unit (v4 contract minus profileName). */

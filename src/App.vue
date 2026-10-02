@@ -9,6 +9,7 @@ import { Message } from '@arco-design/web-vue'
 import ModpackImportDialog from '@/components/ModpackImportDialog.vue'
 import PluginFileImportDialog from '@/components/PluginFileImportDialog.vue'
 import InstanceLaunchErrorDialog from '@/components/InstanceLaunchErrorDialog.vue'
+import ProviderTemplateFillDialog from '@/components/ProviderTemplateFillDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -367,6 +368,11 @@ async function onHeaderMouseDown(e: MouseEvent) {
       :initial-instance-id="dropInstanceId"
     />
     <InstanceLaunchErrorDialog />
+    <!-- issue #86: opens after a modpack import that carried provider templates. -->
+    <ProviderTemplateFillDialog
+      :visible="!!store.pendingProviderTemplateFill"
+      @update:visible="(v: boolean) => { if (!v) store.pendingProviderTemplateFill = null }"
+    />
   </a-layout>
 </template>
 <style lang="scss" scoped>

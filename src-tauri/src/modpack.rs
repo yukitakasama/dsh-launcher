@@ -81,6 +81,32 @@ pub struct ModpackFileEntry {
     pub urls: Vec<String>,
 }
 
+/// A provider template carried by a modpack (issue #86): the managed fields
+/// of one provider route, sanitized on export — `apiKeyEnv` is always the
+/// placeholder (`DSH_TEMPLATE_API_KEY`) and no secret ever ships. Import
+/// splices the route into the target profile's `cordis.patch.yml`; the fill
+/// dialog then prompts for the real key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModpackProviderTemplate {
+    /// Route name (the `providers` dict key).
+    pub route: String,
+    #[serde(default, rename = "displayName")]
+    pub display_name: String,
+    /// Always `DSH_TEMPLATE_API_KEY` in a shipped pack.
+    #[serde(default, rename = "apiKeyEnv")]
+    pub api_key_env: String,
+    #[serde(default)]
+    pub api: String,
+    #[serde(default, rename = "baseURL")]
+    pub base_url: String,
+    #[serde(default)]
+    pub models: Vec<crate::providers::ProviderModel>,
+    /// v5 dshhome only: profile names the template applies to; empty = all
+    /// profiles (ignored by the v4 single-profile form).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
+}
+
 /// Modpack manifest. `display_name` / `description` stay untyped: v3+ allows
 /// either a string or a `{locale: text}` map, and both round-trip verbatim.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -113,6 +139,10 @@ pub struct ModpackManifest {
     /// v4: heavy content download manifest (not used by legacy v2/v3 packs).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<ModpackFileEntry>,
+    /// Provider route templates (issue #86); sanitized on export, applied
+    /// into the target profile patch on import.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ModpackProviderTemplate>,
     // --- manifest v5 dshhome form (whole-DSH_HOME snapshot) ---------------
     #[serde(default, rename = "defaultProfile")]
     pub default_profile: Option<String>,
@@ -154,6 +184,10 @@ pub struct ExportContents {
     /// pack carries no skills.
     #[serde(default)]
     pub skills: Vec<String>,
+    /// Provider route names to carry as sanitized templates (issue #86).
+    /// Empty = the pack carries no provider templates.
+    #[serde(default)]
+    pub providers: Vec<String>,
 }
 
 fn default_include() -> bool {
@@ -170,6 +204,7 @@ impl Default for ExportContents {
             extra_files: false,
             agents_md: false,
             skills: Vec::new(),
+            providers: Vec::new(),
         }
     }
 }
@@ -1081,6 +1116,11 @@ pub async fn export_modpack(
         } else {
             None
         };
+        // issue #86: sanitized provider templates for the selected routes.
+        let providers = patch
+            .as_deref()
+            .map(|p| extract_provider_templates(p, &contents.providers))
+            .unwrap_or_default();
 
         // Local instance icon (issue #8): read from <home>/icons here; the
         // remote case was fetched on the async side already.
@@ -1122,6 +1162,7 @@ pub async fn export_modpack(
             dependencies: pinned,
             patch,
             files: Vec::new(),
+            providers,
             // dshhome-only fields stay empty: exports are single-profile packs.
             default_profile: None,
             profiles: None,
@@ -1272,6 +1313,63 @@ struct ProfileExport {
     lockfile: Option<Vec<u8>>,
     workspace: Option<Vec<u8>>,
     extra: Vec<(String, Vec<u8>)>,
+    /// Sanitized provider templates selected for this profile (issue #86).
+    providers: Vec<ModpackProviderTemplate>,
+}
+
+/// Converts one live route into a shippable template (issue #86): managed
+/// fields only, `apiKeyEnv` replaced by the placeholder, unmanaged `extra`
+/// keys dropped — better to lose a custom knob than leak user configuration.
+fn template_from_route(r: &crate::providers::ProviderRoute) -> ModpackProviderTemplate {
+    ModpackProviderTemplate {
+        route: r.route.clone(),
+        display_name: r.display_name.clone(),
+        api_key_env: crate::providers::PROVIDER_TEMPLATE_PLACEHOLDER.to_string(),
+        api: r.api.clone(),
+        base_url: r.base_url.clone(),
+        models: r.models.clone(),
+        profiles: Vec::new(),
+    }
+}
+
+/// Extracts the templates selected for export from a patch text (issue #86).
+/// Failing routes are dropped with a warning; a malformed patch carries no
+/// templates rather than failing the whole export.
+fn extract_provider_templates(
+    patch: &str,
+    selected: &[String],
+) -> Vec<ModpackProviderTemplate> {
+    if selected.is_empty() {
+        return Vec::new();
+    }
+    match crate::providers::parse_provider_routes(patch) {
+        Ok(routes) => routes
+            .iter()
+            .filter(|r| selected.iter().any(|s| s == &r.route))
+            .map(template_from_route)
+            .collect(),
+        Err(e) => {
+            crate::log_warn!("整合包导出：解析供应商路由失败，跳过模板提取: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Converts a shipped template back into a writable route (issue #86). The
+/// placeholder is re-imposed here regardless of the manifest content so a
+/// hand-edited pack cannot smuggle a route pointing at someone else's
+/// credential name.
+fn provider_route_from_template(t: &ModpackProviderTemplate) -> crate::providers::ProviderRoute {
+    crate::providers::ProviderRoute {
+        route: t.route.clone(),
+        display_name: t.display_name.clone(),
+        api_key_env: crate::providers::PROVIDER_TEMPLATE_PLACEHOLDER.to_string(),
+        api: t.api.clone(),
+        base_url: t.base_url.clone(),
+        models: t.models.clone(),
+        extra: Default::default(),
+        catalog: false,
+    }
 }
 
 /// Reads a profile dir and collects its export payload: the bundle stack,
@@ -1346,6 +1444,10 @@ fn collect_profile_export(
     } else {
         Vec::new()
     };
+    let providers = patch
+        .as_deref()
+        .map(|p| extract_provider_templates(p, &contents.providers))
+        .unwrap_or_default();
     Ok(ProfileExport {
         bundles,
         pinned,
@@ -1353,6 +1455,7 @@ fn collect_profile_export(
         lockfile,
         workspace,
         extra,
+        providers,
     })
 }
 
@@ -1509,6 +1612,18 @@ pub async fn export_dshhome_modpack(
             dependencies: BTreeMap::new(),
             patch: None,
             files: Vec::new(),
+            // issue #86: per-profile templates flattened into one list, each
+            // tagged with the profile it was collected from.
+            providers: collected
+                .iter()
+                .flat_map(|(pname, payload)| {
+                    payload.providers.iter().map(move |t| {
+                        let mut t = t.clone();
+                        t.profiles = vec![pname.clone()];
+                        t
+                    })
+                })
+                .collect(),
             default_profile: Some(default_profile),
             profiles: Some(units),
             presets: None,
@@ -2143,6 +2258,20 @@ async fn do_import_modpack(
         }
     }
 
+    // 5.5 issue #86: provider templates spliced into the profile patch AFTER
+    //     overrides/ (which can overwrite the patch written in step 3).
+    if !manifest.providers.is_empty() {
+        apply_provider_templates(
+            app,
+            state,
+            task_id,
+            &dest,
+            &profile_name,
+            &manifest.providers,
+        )
+        .await;
+    }
+
     // 6. manifest v4 files[]: heavy content fetched on demand, each file
     //    verified by sha256 + size; any failure rolls the profile back.
     if !manifest.files.is_empty() {
@@ -2221,6 +2350,91 @@ async fn do_import_modpack(
         instance_id,
         instance_name: final_instance_name,
     })
+}
+
+/// Applies the pack's provider templates to one profile's patch layer
+/// (issue #86). Templates whose `profiles` tag is empty or contains
+/// `profile_name` are converted to routes (placeholder `apiKeyEnv`) and
+/// spliced in one batched pass; if any template in the batch is rejected,
+/// the remaining ones are applied per-route (failures logged and skipped).
+/// Provider templates are additive content — a failure never fails the
+/// import.
+async fn apply_provider_templates(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    task_id: &str,
+    profile_dir: &Path,
+    profile_name: &str,
+    templates: &[ModpackProviderTemplate],
+) {
+    let applicable: Vec<&ModpackProviderTemplate> = templates
+        .iter()
+        .filter(|t| t.profiles.is_empty() || t.profiles.iter().any(|p| p == profile_name))
+        .collect();
+    if applicable.is_empty() {
+        return;
+    }
+    let patch_path = profile_dir.join("cordis.patch.yml");
+    let mut text = std::fs::read_to_string(&patch_path).unwrap_or_default();
+    let routes: Vec<crate::providers::ProviderRoute> = applicable
+        .iter()
+        .map(|t| provider_route_from_template(t))
+        .collect();
+    // Happy path: splice the whole batch in a single pass (one parse per
+    // route inside the engine, one final re-parse). apply_routes_to_patch
+    // takes the document by reference and returns a new string, so a failed
+    // batch attempt leaves `text` untouched and the per-route fallback below
+    // starts from the original state.
+    let mut applied = 0usize;
+    match crate::providers::apply_routes_to_patch(&text, &routes) {
+        Ok(next) => {
+            text = next;
+            applied = routes.len();
+        }
+        Err(_) => {
+            // Fall back to per-route application so one bad template doesn't
+            // drop the rest of the batch; failures are logged and skipped.
+            for (t, route) in applicable.iter().zip(routes.iter()) {
+                match crate::providers::apply_routes_to_patch(&text, std::slice::from_ref(route)) {
+                    Ok(next) => {
+                        text = next;
+                        applied += 1;
+                    }
+                    Err(e) => {
+                        crate::tasks::push_task_log_pub(
+                            app,
+                            state,
+                            task_id,
+                            &format!("供应商模板「{}」套用失败，已跳过: {e}", t.route),
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+    }
+    if applied == 0 {
+        return;
+    }
+    if let Err(e) = std::fs::write(&patch_path, &text) {
+        crate::tasks::push_task_log_pub(
+            app,
+            state,
+            task_id,
+            &format!("供应商模板写入失败，已放弃（导入不受影响）: {e}"),
+        )
+        .await;
+        return;
+    }
+    crate::tasks::push_task_log_pub(
+        app,
+        state,
+        task_id,
+        &format!(
+            "profile「{profile_name}」: 已套用 {applied} 个供应商模板（API Key 待填写）"
+        ),
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -2605,6 +2819,25 @@ async fn import_dshhome_body(
         .await;
     }
 
+    // 3.5 issue #86: provider templates into each profile's patch layer,
+    //     filtered by the template's `profiles` tag (empty = all profiles).
+    if !manifest.providers.is_empty() {
+        for name in profiles.keys() {
+            let dir = crate::plugins::profile_dir_pub(home, name);
+            if dir.exists() {
+                apply_provider_templates(
+                    app,
+                    state,
+                    task_id,
+                    &dir,
+                    name,
+                    &manifest.providers,
+                )
+                .await;
+            }
+        }
+    }
+
     // 4. Pointer downloads into the HOME root: files[] plus heavy skills[]
     //    (small skills already shipped inside overrides/skills/).
     let mut entries: Vec<ModpackFileEntry> = manifest.files.clone();
@@ -2873,6 +3106,7 @@ importers:
             ]),
             patch: None,
             files: vec![],
+            providers: Vec::new(),
             default_profile: None,
             profiles: None,
             presets: None,
@@ -2940,6 +3174,7 @@ importers:
             dependencies: BTreeMap::new(),
             patch: None,
             files: vec![],
+            providers: Vec::new(),
             default_profile: None,
             profiles: None,
             presets: None,
@@ -2983,6 +3218,7 @@ importers:
             dependencies: BTreeMap::new(),
             patch: None,
             files: vec![],
+            providers: Vec::new(),
             default_profile: Some("main".to_string()),
             profiles: Some(BTreeMap::from([(
                 "main".to_string(),
@@ -3219,5 +3455,111 @@ importers:
         let parsed: ExportContents = serde_json::from_str(r#"{"patch":true}"#).unwrap();
         assert!(!parsed.agents_md);
         assert!(parsed.skills.is_empty());
+        assert!(parsed.providers.is_empty());
+    }
+
+    /// issue #86: templates round-trip through the manifest JSON with the
+    /// camelCase keys, and older manifests without `providers` still parse.
+    #[test]
+    fn provider_templates_manifest_serde_roundtrip() {
+        let manifest_json = r#"{
+            "manifestVersion": 4,
+            "type": "profile",
+            "name": "pack",
+            "version": "1.0.0",
+            "bundles": [],
+            "dependencies": {},
+            "providers": [
+                {
+                    "route": "my-gateway",
+                    "displayName": "My Gateway",
+                    "apiKeyEnv": "DSH_TEMPLATE_API_KEY",
+                    "api": "openai-responses",
+                    "baseURL": "https://gw.example.com",
+                    "models": [{ "id": "m1", "name": "", "input": ["text"] }]
+                }
+            ]
+        }"#;
+        let manifest: ModpackManifest = serde_json::from_str(manifest_json).unwrap();
+        assert_eq!(manifest.providers.len(), 1);
+        let t = &manifest.providers[0];
+        assert_eq!(t.route, "my-gateway");
+        assert_eq!(
+            t.api_key_env,
+            crate::providers::PROVIDER_TEMPLATE_PLACEHOLDER
+        );
+        assert_eq!(t.base_url, "https://gw.example.com");
+        assert_eq!(t.models[0].id, "m1");
+        // Round-trip keeps the same wire shape.
+        let json = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(json["providers"][0]["baseURL"], "https://gw.example.com");
+        assert_eq!(json["providers"][0]["apiKeyEnv"], "DSH_TEMPLATE_API_KEY");
+        // Older packs omit `providers` entirely.
+        let legacy: ModpackManifest =
+            serde_json::from_str(r#"{"manifestVersion":4,"name":"x","version":"1","bundles":[],"dependencies":{}}"#).unwrap();
+        assert!(legacy.providers.is_empty());
+    }
+
+    /// issue #86: export sanitization — the template carries managed fields
+    /// only, the placeholder apiKeyEnv, and never the route's `extra` keys.
+    #[test]
+    fn template_from_route_drops_extra_and_imposes_placeholder() {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "headers".to_string(),
+            serde_json::json!({ "X-Secret-Hint": "leak-me" }),
+        );
+        let route = crate::providers::ProviderRoute {
+            route: "my-gateway".to_string(),
+            display_name: "My Gateway".to_string(),
+            api_key_env: "MY_REAL_ENV_NAME".to_string(),
+            api: "openai-responses".to_string(),
+            base_url: "https://gw.example.com".to_string(),
+            models: vec![crate::providers::ProviderModel {
+                id: "m1".to_string(),
+                ..Default::default()
+            }],
+            extra,
+            catalog: false,
+        };
+        let t = template_from_route(&route);
+        assert_eq!(t.api_key_env, crate::providers::PROVIDER_TEMPLATE_PLACEHOLDER);
+        assert_eq!(t.display_name, "My Gateway");
+        assert_eq!(t.base_url, "https://gw.example.com");
+        assert_eq!(t.models.len(), 1);
+        // The wire shape must not carry the extra keys either.
+        let json = serde_json::to_value(&t).unwrap();
+        assert!(json.get("headers").is_none());
+        assert_eq!(json["apiKeyEnv"], "DSH_TEMPLATE_API_KEY");
+    }
+
+    /// issue #86: import-side conversion re-imposes the placeholder even if a
+    /// hand-edited pack smuggled a real env name, and the v5 `profiles` tag
+    /// filters which profile a template applies to.
+    #[test]
+    fn provider_route_from_template_reimposes_placeholder() {
+        let t = ModpackProviderTemplate {
+            route: "gw".to_string(),
+            display_name: String::new(),
+            api_key_env: "SOMEONE_ELSES_KEY".to_string(),
+            api: "openai-responses".to_string(),
+            base_url: "https://gw.example.com".to_string(),
+            models: Vec::new(),
+            profiles: vec!["main".to_string()],
+        };
+        let r = provider_route_from_template(&t);
+        assert_eq!(r.api_key_env, crate::providers::PROVIDER_TEMPLATE_PLACEHOLDER);
+        assert_eq!(r.extra.len(), 0);
+        // v5 filter semantics: empty tag = all profiles.
+        let applicable_main: Vec<&ModpackProviderTemplate> = [&t]
+            .into_iter()
+            .filter(|t| t.profiles.is_empty() || t.profiles.iter().any(|p| p == "main"))
+            .collect();
+        assert_eq!(applicable_main.len(), 1);
+        let applicable_other: Vec<&ModpackProviderTemplate> = [&t]
+            .into_iter()
+            .filter(|t| t.profiles.is_empty() || t.profiles.iter().any(|p| p == "other"))
+            .collect();
+        assert!(applicable_other.is_empty());
     }
 }
