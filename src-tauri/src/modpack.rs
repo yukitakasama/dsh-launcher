@@ -1335,10 +1335,7 @@ fn template_from_route(r: &crate::providers::ProviderRoute) -> ModpackProviderTe
 /// Extracts the templates selected for export from a patch text (issue #86).
 /// Failing routes are dropped with a warning; a malformed patch carries no
 /// templates rather than failing the whole export.
-fn extract_provider_templates(
-    patch: &str,
-    selected: &[String],
-) -> Vec<ModpackProviderTemplate> {
+fn extract_provider_templates(patch: &str, selected: &[String]) -> Vec<ModpackProviderTemplate> {
     if selected.is_empty() {
         return Vec::new();
     }
@@ -2430,9 +2427,7 @@ async fn apply_provider_templates(
         app,
         state,
         task_id,
-        &format!(
-            "profile「{profile_name}」: 已套用 {applied} 个供应商模板（API Key 待填写）"
-        ),
+        &format!("profile「{profile_name}」: 已套用 {applied} 个供应商模板（API Key 待填写）"),
     )
     .await;
 }
@@ -2825,15 +2820,8 @@ async fn import_dshhome_body(
         for name in profiles.keys() {
             let dir = crate::plugins::profile_dir_pub(home, name);
             if dir.exists() {
-                apply_provider_templates(
-                    app,
-                    state,
-                    task_id,
-                    &dir,
-                    name,
-                    &manifest.providers,
-                )
-                .await;
+                apply_provider_templates(app, state, task_id, &dir, name, &manifest.providers)
+                    .await;
             }
         }
     }
@@ -3495,8 +3483,10 @@ importers:
         assert_eq!(json["providers"][0]["baseURL"], "https://gw.example.com");
         assert_eq!(json["providers"][0]["apiKeyEnv"], "DSH_TEMPLATE_API_KEY");
         // Older packs omit `providers` entirely.
-        let legacy: ModpackManifest =
-            serde_json::from_str(r#"{"manifestVersion":4,"name":"x","version":"1","bundles":[],"dependencies":{}}"#).unwrap();
+        let legacy: ModpackManifest = serde_json::from_str(
+            r#"{"manifestVersion":4,"name":"x","version":"1","bundles":[],"dependencies":{}}"#,
+        )
+        .unwrap();
         assert!(legacy.providers.is_empty());
     }
 
@@ -3523,7 +3513,10 @@ importers:
             catalog: false,
         };
         let t = template_from_route(&route);
-        assert_eq!(t.api_key_env, crate::providers::PROVIDER_TEMPLATE_PLACEHOLDER);
+        assert_eq!(
+            t.api_key_env,
+            crate::providers::PROVIDER_TEMPLATE_PLACEHOLDER
+        );
         assert_eq!(t.display_name, "My Gateway");
         assert_eq!(t.base_url, "https://gw.example.com");
         assert_eq!(t.models.len(), 1);
@@ -3548,7 +3541,10 @@ importers:
             profiles: vec!["main".to_string()],
         };
         let r = provider_route_from_template(&t);
-        assert_eq!(r.api_key_env, crate::providers::PROVIDER_TEMPLATE_PLACEHOLDER);
+        assert_eq!(
+            r.api_key_env,
+            crate::providers::PROVIDER_TEMPLATE_PLACEHOLDER
+        );
         assert_eq!(r.extra.len(), 0);
         // v5 filter semantics: empty tag = all profiles.
         let applicable_main: Vec<&ModpackProviderTemplate> = [&t]
