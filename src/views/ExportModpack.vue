@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
-import type { SkillInfo } from '@/api/types'
+import type { SkillInfo, ProviderRoute } from '@/api/types'
 import { useLauncherStore } from '@/stores/launcher'
 import HintIcon from '@/components/HintIcon.vue'
 
@@ -37,6 +37,11 @@ const contents = ref({
 const skillList = ref<SkillInfo[]>([])
 const skillSelected = ref<string[]>([])
 
+/** Provider routes of the exported profile + the selected ones (issue #86).
+ * Templates ship sanitized (apiKeyEnv placeholder, no secrets). */
+const providerList = ref<ProviderRoute[]>([])
+const providerSelected = ref<string[]>([])
+
 /** Select-all checkbox state for the SKILL list. */
 const skillAllChecked = computed(
   () => skillList.value.length > 0 && skillSelected.value.length === skillList.value.length,
@@ -57,7 +62,14 @@ onMounted(async () => {
     return
   }
   try {
-    skillList.value = await api.listInstanceSkills(ctx.homeId)
+    const [skills, providers] = await Promise.all([
+      api.listInstanceSkills(ctx.homeId),
+      api.listProviderRoutes(ctx.homeId, ctx.profile).catch(() => ({ routes: [] as ProviderRoute[], hash: '' })),
+    ])
+    skillList.value = skills
+    providerList.value = providers.routes
+    // Default: carry every route as a template (user can deselect).
+    providerSelected.value = providers.routes.map((r) => r.route)
   } catch (e) {
     Message.error(String(e))
   }
@@ -95,7 +107,11 @@ async function startExport() {
       displayName: form.value.displayName.trim() || undefined,
       description: form.value.description.trim() || undefined,
       author: form.value.author.trim() || undefined,
-      contents: { ...contents.value, skills: [...skillSelected.value] },
+      contents: {
+        ...contents.value,
+        skills: [...skillSelected.value],
+        providers: contents.value.patch ? [...providerSelected.value] : [],
+      },
     })
     Message.success(t('exportPack.exported', { path }))
     goBack()
@@ -185,6 +201,29 @@ async function startExport() {
             {{ t('exportPack.contentAgents') }}
             <HintIcon :content="t('exportPack.contentAgentsHint')" />
           </a-checkbox>
+        </div>
+        <div v-if="providerList.length > 0" class="content-row content-skills">
+          <div class="content-skills-title">
+            <a-checkbox
+              :model-value="providerSelected.length === providerList.length"
+              :indeterminate="providerSelected.length > 0 && providerSelected.length < providerList.length"
+              @change="
+                (v: boolean | (string | number | boolean)[]) =>
+                  (providerSelected = v === true ? providerList.map((r) => r.route) : [])
+              "
+            >
+              {{ t('exportPack.contentProviders') }}
+            </a-checkbox>
+            <HintIcon :content="t('exportPack.contentProvidersHint')" />
+          </div>
+          <a-checkbox-group v-model="providerSelected" class="content-skills-list">
+            <a-checkbox v-for="r in providerList" :key="r.route" :value="r.route">
+              {{ r.displayName || r.route }}
+              <span v-if="r.displayName && r.displayName !== r.route" class="content-skill-entry">
+                ({{ r.route }})
+              </span>
+            </a-checkbox>
+          </a-checkbox-group>
         </div>
         <div v-if="skillList.length > 0" class="content-row content-skills">
           <div class="content-skills-title">

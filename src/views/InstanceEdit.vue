@@ -8,6 +8,12 @@ import type { CompatibilityReport as CompatibilityReportType } from '@/api/types
 import CompatibilityReport from '@/components/CompatibilityReport.vue'
 import { latestRequest } from '@/utils/latest-request'
 import { renderMarkdown } from '@/utils/markdown'
+import { routeToEnvName } from '@/utils/envName'
+import {
+  providerCheckStatus,
+  providerCheckStatusKeySuffix,
+  translateProviderCheck,
+} from '@/utils/provider-check'
 import { useLauncherStore } from '@/stores/launcher'
 import type {
   CredentialRefInfo,
@@ -1199,17 +1205,6 @@ function onProviderPresetChange(value: unknown) {
   }
 }
 
-/** The credential ref derived from a route id: uppercased, sanitized,
- *  suffixed — `my_gw` becomes `MY_GW_API_KEY`. */
-function routeToEnvName(route: string): string {
-  const clean = route
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-  return clean ? `${clean}_API_KEY` : ''
-}
-
 /** The credential ref this form saves under: the stored key wins (editing),
  *  otherwise the derived name; an explicit new API key always lands on the
  *  derived name so a rename re-derives it. */
@@ -1638,8 +1633,10 @@ async function runProviderCheck() {
   }
 }
 
+/** `a-alert` type for a status. Shares its severity table with the
+ *  early-loading window's ProviderReport.vue so both surfaces agree. */
 function providerCheckColor(status: string): 'info' | 'warning' | 'success' {
-  switch (status) {
+  switch (providerCheckStatus(status)) {
     case 'warn':
       return 'warning'
     case 'unknown':
@@ -2985,11 +2982,11 @@ const terminalRunning = ref(false)
                   class="provider-report"
                 >
                   <template #title>
-                    {{ report.route }} · {{ t(`instanceEdit.providerCheckStatus${report.status === 'warn' ? 'Warn' : report.status === 'unknown' ? 'Unknown' : 'Ok'}`) }}
+                    {{ report.route }} · {{ t(`instanceEdit.providerCheckStatus${providerCheckStatusKeySuffix(report.status)}`) }}
                   </template>
                   <ul class="provider-check-list">
                     <li v-for="(check, idx) in report.checks" :key="idx">
-                      {{ te(`instanceEdit.providerChecks.${check.code}`) ? t(`instanceEdit.providerChecks.${check.code}`, check.params) : check.code }}
+                      {{ translateProviderCheck(t, te, check.code, check.params) }}
                     </li>
                   </ul>
                 </a-alert>

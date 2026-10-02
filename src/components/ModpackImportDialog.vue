@@ -124,7 +124,7 @@ async function confirm() {
   if (!canConfirm.value) return
   busy.value = true
   try {
-    await api.startImportModpackTask({
+    const taskId = await api.startImportModpackTask({
       source: source.value.trim(),
       force: force.value,
       instance_name: instanceName.value.trim() || undefined,
@@ -135,6 +135,9 @@ async function confirm() {
       // existing instance, whose HOME already fixes the distro).
       wsl_distro: isDshhome.value ? wslDistro.value : undefined,
     })
+    // issue #86: remember this import so the provider-template fill dialog can
+    // open automatically once this exact task (not any import) completes.
+    store.pendingImportTaskId = taskId
     emit('update:visible', false)
     await store.refreshTasks()
     Message.success(t('download.taskAdded'))
@@ -186,6 +189,9 @@ function close() {
           <template v-if="manifest.dshVersion"> · DSH {{ manifest.dshVersion }}</template>
           <template v-if="manifest.files?.length">
             · {{ t('modpack.filesCount', { count: manifest.files.length }) }}
+          </template>
+          <template v-if="manifest.providers?.length">
+            · {{ t('modpack.providerTemplates', { count: manifest.providers.length }) }}
           </template>
         </a-alert>
         <a-alert v-if="isDshhome" type="warning" class="modpack-summary">
