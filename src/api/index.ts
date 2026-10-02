@@ -28,6 +28,7 @@ import type {
   ProviderRouteList,
   ProviderAdvancedFieldSchema,
   CredentialRefList,
+  DeepseekApiKeyConfig,
   ProviderRouteReport,
   RepoSkillInfo,
   SkillInfo,
@@ -93,6 +94,8 @@ interface MockDb {
   providers: Record<string, ProviderRoute[]>
   /** Credential refs per homeId (full values; the mock is local-only). */
   credentials: Record<string, Record<string, string>>
+  /** deepseek-api-key unified entry config per key `<homeId>::<instanceId>::<profile>` (issue #84). */
+  deepseekApikey: Record<string, DeepseekApiKeyConfig>
 }
 
 function seedDb(): MockDb {
@@ -171,6 +174,16 @@ function seedDb(): MockDb {
     credentials: {
       'h-default': { DEEPSEEK_API_KEY: 'sk-mock1234567890abcdef' },
     },
+    deepseekApikey: {
+      'h-default::i-main::web': {
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        masked: 'sk-mock••••••••',
+        shadowedByEnv: false,
+        baseUrlOverriddenByEnv: false,
+        hash: '1',
+      },
+    },
   }
 }
 
@@ -192,6 +205,8 @@ function loadDb(): MockDb {
       db.settings.plugin_sources = db.settings.plugin_sources ?? seedDb().settings.plugin_sources
       db.settings.update_channel = db.settings.update_channel ?? 'dev'
       db.settings.update_suppressed = db.settings.update_suppressed ?? []
+      // Backfill the deepseek-api-key mock map (issue #84) for old persisted dbs.
+      db.deepseekApikey = db.deepseekApikey ?? {}
       db.mcp = db.mcp ?? {}
       db.providers = db.providers ?? {}
       db.credentials = db.credentials ?? {}
@@ -1127,6 +1142,34 @@ async function mockCall<T>(cmd: string, args?: Record<string, unknown>): Promise
       })
       return reports as T
     }
+    // ---- deepseek-api-key unified entry (issue #84) ----
+    case 'list_deepseek_apikey': {
+      const key = `${String(args?.homeId)}::${String(args?.instanceId)}::${String(args?.profile)}`
+      const existing = db.deepseekApikey[key]
+      const fallback: DeepseekApiKeyConfig = {
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        masked: '',
+        shadowedByEnv: false,
+        baseUrlOverriddenByEnv: false,
+        hash: '1',
+      }
+      return (existing ?? fallback) as T
+    }
+    case 'save_deepseek_apikey': {
+      const key = `${String(args?.homeId)}::${String(args?.instanceId)}::${String(args?.profile)}`
+      const next: DeepseekApiKeyConfig = {
+        apiKeyEnv: String(args?.apiKeyEnv ?? 'DEEPSEEK_API_KEY'),
+        baseUrl: String(args?.baseUrl ?? 'https://api.deepseek.com/anthropic'),
+        masked: '',
+        shadowedByEnv: false,
+        baseUrlOverriddenByEnv: false,
+        hash: String(Date.now()),
+      }
+      db.deepseekApikey[key] = next
+      saveDb(db)
+      return next as T
+    }
     case 'read_modpack_manifest':
       return {
         manifestVersion: 4,
@@ -1723,6 +1766,34 @@ export const api = {
   /** Pre-launch readiness of every provider route (advisory, never blocks). */
   checkProviderRoutes: (homeId: string, instanceId: string, profile: string) =>
     call<ProviderRouteReport[]>('check_provider_routes', { homeId, instanceId, profile }),
+  /**
+   * Reads the `deepseek-api-key` unified entry config (issue #84): the
+   * `@deepseek-ai/dsh-llm-deepseek-api-key` plugin's apiKeyEnv / baseURL plus
+   * masking and env-shadow flags. Defaults are filled when the entry is absent.
+   */
+  listDeepseekApikey: (homeId: string, instanceId: string, profile: string) =>
+    call<DeepseekApiKeyConfig>('list_deepseek_apikey', { homeId, instanceId, profile }),
+  /**
+   * Writes the `deepseek-api-key` unified entry config. `expectedHash` must
+   * match the last read (stale writes are refused); env-provided values stay
+   * read-only and are not overwritten.
+   */
+  saveDeepseekApikey: (
+    homeId: string,
+    instanceId: string,
+    profile: string,
+    apiKeyEnv: string,
+    baseUrl: string,
+    expectedHash: string,
+  ) =>
+    call<DeepseekApiKeyConfig>('save_deepseek_apikey', {
+      homeId,
+      instanceId,
+      profile,
+      apiKeyEnv,
+      baseUrl,
+      expectedHash,
+    }),
   exportModpack: (input: ExportModpackInput) => call<string>('export_modpack', { input }),
   /** Multi-profile (manifest v5 dshhome) export. */
   exportDshhomeModpack: (input: ExportDshhomeInput) =>

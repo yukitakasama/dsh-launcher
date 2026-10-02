@@ -546,6 +546,23 @@ export interface CredentialRefList {
   hash: string
 }
 
+/** DeepSeek API-key plugin config (issue #84): `apiKeyEnv` / `baseUrl`,
+ *  the masked credential, env-shadowing state and the write guard hash. */
+export interface DeepseekApiKeyConfig {
+  /** Credential env name the plugin reads its key from (default DEEPSEEK_API_KEY). */
+  apiKeyEnv: string
+  /** Plugin base URL (default https://api.deepseek.com/anthropic). */
+  baseUrl: string
+  /** Masked credential value; the full value never leaves the backend. */
+  masked: string
+  /** The instance env_overrides already provides `apiKeyEnv` (read-only). */
+  shadowedByEnv: boolean
+  /** `$DEEPSEEK_BASE_URL` is set in the instance env (`baseUrl` read-only). */
+  baseUrlOverriddenByEnv: boolean
+  /** sha256 of the patch file at read time. */
+  hash: string
+}
+
 /** One readiness check of a route, translated by the frontend via `code`. */
 export interface ProviderCheckItem {
   code: string

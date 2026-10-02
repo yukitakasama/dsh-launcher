@@ -23,6 +23,14 @@ use crate::AppState;
 
 /// The plugin whose `config.providers` dict holds the provider routes.
 const PI_AI_MODULE: &str = "@deepseek-ai/dsh-llm-pi-ai";
+/// The official DeepSeek API-key plugin (issue #84): a single flat config
+/// (`apiKeyEnv` + `baseURL`), managed alongside the pi-ai providers.
+const DEEPSEEK_API_KEY_MODULE: &str = "@deepseek-ai/dsh-llm-deepseek-api-key";
+/// Default `baseURL` of `dsh-llm-deepseek-api-key`, overridable by the
+/// instance's `$DEEPSEEK_BASE_URL` launch env (then surfaced read-only).
+const DEEPSEEK_API_KEY_DEFAULT_BASE_URL: &str = "https://api.deepseek.com/anthropic";
+/// Default credential env name the plugin reads its key from.
+const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 /// Patch-layer filename inside a profile directory.
 const PATCH_FILENAME: &str = "cordis.patch.yml";
 /// Credential store filename inside a DSH_HOME.
@@ -612,7 +620,9 @@ struct EntrySpan {
 /// Finds the top-level entry whose `name` is the pi-ai module. Only the
 /// entry's own keys are inspected (the `- ` line and lines indented one
 /// level in), so a nested `name:` inside `config` cannot match.
-fn find_pi_ai_entry(lines: &[&str]) -> Option<EntrySpan> {
+/// Locates a patch entry by its `name:` (the plugin package id). Reused for
+/// both the pi-ai providers entry and the deepseek-api-key plugin (issue #84).
+fn find_named_entry(lines: &[&str], module: &str) -> Option<EntrySpan> {
     for (i, line) in lines.iter().enumerate() {
         if !line.trim_start().starts_with("- ") {
             continue;
@@ -642,7 +652,7 @@ fn find_pi_ai_entry(lines: &[&str]) -> Option<EntrySpan> {
                 continue;
             };
             if let Some(rest) = key.strip_prefix("name:") {
-                if unquote(rest) == PI_AI_MODULE {
+                if unquote(rest) == module {
                     return Some(EntrySpan {
                         start: i,
                         end,
@@ -653,6 +663,11 @@ fn find_pi_ai_entry(lines: &[&str]) -> Option<EntrySpan> {
         }
     }
     None
+}
+
+/// The `@deepseek-ai/dsh-llm-pi-ai` entry (issue #76).
+fn find_pi_ai_entry(lines: &[&str]) -> Option<EntrySpan> {
+    find_named_entry(lines, PI_AI_MODULE)
 }
 
 /// The `providers:` mapping of an entry: its line, indent, the end of the
@@ -1466,6 +1481,259 @@ pub fn delete_credential_ref(
 }
 
 // ---------------------------------------------------------------------------
+// DeepSeek API-key plugin (issue #84): a single flat config entry
+// ---------------------------------------------------------------------------
+
+/// The deepseek-api-key plugin's read form: `apiKeyEnv` / `baseURL`, the
+/// masked credential (never plaintext), env-shadowing state and the write
+/// guard hash.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepseekApiKeyConfig {
+    pub api_key_env: String,
+    pub base_url: String,
+    /// Masked credential value; the full value never leaves the backend.
+    pub masked: String,
+    /// The instance's env_overrides already provides `apiKeyEnv`: the
+    /// credential-store layer is shadowed (launch env wins in DSH).
+    pub shadowed_by_env: bool,
+    /// `$DEEPSEEK_BASE_URL` is set in the instance env: `baseURL` is read-only.
+    pub base_url_overridden_by_env: bool,
+    /// sha256 of the patch file at read time; a write whose `expected_hash`
+    /// no longer matches is refused instead of clobbering an external edit.
+    pub hash: String,
+}
+
+/// The `config:` mapping of an entry: the line holding `config:`, the indent
+/// its child keys use, and the end of the mapping (exclusive).
+fn find_config_span(lines: &[&str], entry: &EntrySpan) -> Option<(usize, usize, usize)> {
+    let base = entry.indent + 2;
+    let config_line = lines[entry.start..entry.end]
+        .iter()
+        .enumerate()
+        .find(|(offset, l)| {
+            let idx = entry.start + offset;
+            let key = if idx == entry.start {
+                l.trim().trim_start_matches("- ").trim_start()
+            } else if indent_of(l) == base {
+                l.trim()
+            } else {
+                return false;
+            };
+            key == "config:" || key.starts_with("config: ")
+        });
+    let (config_offset, _) = config_line?;
+    let config_idx = entry.start + config_offset;
+    let config_indent =
+        indent_of(lines[config_idx]) + if config_idx == entry.start { 2 } else { 0 };
+    let child_indent = config_indent + 2;
+    let mut map_end = entry.end;
+    for (offset, l) in lines[config_idx + 1..entry.end].iter().enumerate() {
+        let trimmed = l.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if indent_of(l) <= config_indent {
+            map_end = config_idx + 1 + offset;
+            break;
+        }
+    }
+    Some((config_idx, child_indent, map_end))
+}
+
+/// Reads `apiKeyEnv` / `baseURL` from the deepseek-api-key plugin's `config`
+/// mapping (issue #84). Returns `None` when the entry is absent.
+pub fn parse_deepseek_config(raw: &str) -> Option<(String, String)> {
+    let lines: Vec<&str> = raw.lines().collect();
+    let entry = find_named_entry(&lines, DEEPSEEK_API_KEY_MODULE)?;
+    let (config_idx, child_indent, _) = find_config_span(&lines, &entry)?;
+    let mut api_key_env = String::new();
+    let mut base_url = String::new();
+    for l in lines[config_idx + 1..entry.end].iter() {
+        if indent_of(l) < child_indent {
+            break;
+        }
+        if indent_of(l) != child_indent {
+            continue;
+        }
+        let t = l.trim();
+        if let Some(rest) = t.strip_prefix("apiKeyEnv:") {
+            api_key_env = unquote(rest.trim()).to_string();
+        } else if let Some(rest) = t.strip_prefix("baseURL:") {
+            base_url = unquote(rest.trim()).to_string();
+        }
+    }
+    Some((api_key_env, base_url))
+}
+
+/// Writes `apiKeyEnv` / `baseURL` into the deepseek-api-key plugin's `config`
+/// mapping (issue #84). Reuses the byte-safe line splice so comments and every
+/// other config key survive. A missing entry or `config:` mapping is created.
+pub fn splice_deepseek_config(
+    raw: &str,
+    api_key_env: &str,
+    base_url: &str,
+) -> Result<String, String> {
+    let lines: Vec<&str> = raw.lines().collect();
+    match find_named_entry(&lines, DEEPSEEK_API_KEY_MODULE) {
+        Some(entry) => match find_config_span(&lines, &entry) {
+            Some((config_idx, child_indent, mut map_end)) => {
+                let mut out_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+                for (key, value) in [("apiKeyEnv", api_key_env), ("baseURL", base_url)] {
+                    let value = value.trim();
+                    let existing = out_lines[config_idx + 1..map_end].iter().position(|l| {
+                        indent_of(l) == child_indent && l.trim().starts_with(&format!("{key}:"))
+                    });
+                    if value.is_empty() {
+                        if let Some(pos) = existing {
+                            out_lines.remove(config_idx + 1 + pos);
+                            // A line was removed before map_end: keep the bound
+                            // valid for the next key's slice.
+                            map_end -= 1;
+                        }
+                        continue;
+                    }
+                    let line = format!("{}{}: {}", " ".repeat(child_indent), key, value);
+                    if let Some(pos) = existing {
+                        out_lines[config_idx + 1 + pos] = line;
+                    } else {
+                        out_lines.insert(map_end, line);
+                    }
+                }
+                let mut out = out_lines.join("\n");
+                if raw.ends_with('\n') {
+                    out.push('\n');
+                }
+                let reparsed: Vec<&str> = out.lines().collect();
+                if find_named_entry(&reparsed, DEEPSEEK_API_KEY_MODULE).is_none() {
+                    return Err(
+                        "写入后未找到 deepseek-api-key 插件入口，疑似破坏了 cordis.patch.yml"
+                            .to_string(),
+                    );
+                }
+                Ok(out)
+            }
+            None => {
+                let mut out_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+                let pad2 = " ".repeat(entry.indent + 2);
+                let pad4 = " ".repeat(entry.indent + 4);
+                let anchor = find_name_line(&lines, &entry).unwrap_or(entry.start);
+                out_lines.insert(anchor + 1, format!("{pad2}config:"));
+                out_lines.insert(anchor + 2, format!("{pad4}apiKeyEnv: {api_key_env}"));
+                out_lines.insert(anchor + 3, format!("{pad4}baseURL: {base_url}"));
+                let mut out = out_lines.join("\n");
+                if raw.ends_with('\n') {
+                    out.push('\n');
+                }
+                Ok(out)
+            }
+        },
+        None => {
+            let mut kept: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+            kept.retain(|line| line.trim() != "[]");
+            while kept.last().map(|line| line.trim().is_empty()) == Some(true) {
+                kept.pop();
+            }
+            let mut out = kept.join("\n");
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str("- id: llm-deepseek-api-key\n");
+            out.push_str(&format!("  name: '{DEEPSEEK_API_KEY_MODULE}'\n"));
+            out.push_str("  config:\n");
+            out.push_str(&format!("    apiKeyEnv: {api_key_env}\n"));
+            out.push_str(&format!("    baseURL: {base_url}\n"));
+            Ok(out)
+        }
+    }
+}
+
+/// Reads the deepseek-api-key plugin config plus its credential masking and
+/// env-shadowing state. Shared by the `list` command and `save`.
+fn read_deepseek_apikey(
+    state: &AppState,
+    home_id: &str,
+    instance_id: &str,
+    profile: &str,
+) -> Result<DeepseekApiKeyConfig, String> {
+    let home = home_path_of(state, home_id)?;
+    let path = profile_patch_path(&home, profile)?;
+    let raw = read_text(&path)?;
+    let (api_key_env, base_url) = parse_deepseek_config(&raw).unwrap_or_default();
+    let api_key_env = if api_key_env.is_empty() {
+        DEEPSEEK_API_KEY_ENV.to_string()
+    } else {
+        api_key_env
+    };
+    let base_url = if base_url.is_empty() {
+        DEEPSEEK_API_KEY_DEFAULT_BASE_URL.to_string()
+    } else {
+        base_url
+    };
+    let creds_path = home.join(CREDENTIALS_FILENAME);
+    let refs = parse_credential_refs(&read_text(&creds_path)?)?;
+    let env = env_overrides_of(state, instance_id);
+    let masked = match refs.iter().find(|(n, _)| n == &api_key_env) {
+        Some((_, v)) => mask_secret(v),
+        None => String::new(),
+    };
+    let shadowed_by_env = env.iter().any(|(k, _)| k == &api_key_env);
+    let base_url_overridden_by_env = env.iter().any(|(k, _)| k.as_str() == "DEEPSEEK_BASE_URL");
+    Ok(DeepseekApiKeyConfig {
+        api_key_env,
+        base_url,
+        masked,
+        shadowed_by_env,
+        base_url_overridden_by_env,
+        hash: sha256_hex(&raw),
+    })
+}
+
+/// Lists the deepseek-api-key plugin config of one profile (issue #84).
+#[tauri::command]
+pub fn list_deepseek_apikey(
+    state: State<'_, AppState>,
+    home_id: String,
+    instance_id: String,
+    profile: String,
+) -> Result<DeepseekApiKeyConfig, String> {
+    read_deepseek_apikey(&state, &home_id, &instance_id, &profile)
+}
+
+/// Writes the deepseek-api-key plugin `apiKeyEnv` / `baseURL` into the
+/// profile's patch layer (issue #84). The credential secret itself is written
+/// separately via `set_credential_ref` (reusing #76's masking + refs path);
+/// this command only owns the patch-layer config.
+#[tauri::command]
+pub fn save_deepseek_apikey(
+    state: State<'_, AppState>,
+    home_id: String,
+    instance_id: String,
+    profile: String,
+    api_key_env: String,
+    base_url: String,
+    expected_hash: String,
+) -> Result<DeepseekApiKeyConfig, String> {
+    let api_key_env = api_key_env.trim().to_string();
+    if api_key_env.is_empty() {
+        return Err("apiKeyEnv 不能为空".to_string());
+    }
+    if api_key_env.chars().any(|c| c.is_whitespace()) {
+        return Err("apiKeyEnv 需为合法环境变量名，不能含空白".to_string());
+    }
+    let home = home_path_of(&state, &home_id)?;
+    let path = profile_patch_path(&home, &profile)?;
+    let raw = read_text(&path)?;
+    ensure_unchanged(&raw, &expected_hash)?;
+    let text = splice_deepseek_config(&raw, &api_key_env, &base_url)?;
+    parse_deepseek_config(&text)
+        .ok_or_else(|| "写入后无法解析 deepseek-api-key 配置".to_string())?;
+    write_text(&path, &text)?;
+    crate::log_info!("已保存 deepseek-api-key 配置: {}", path.display());
+    read_deepseek_apikey(&state, &home_id, &instance_id, &profile)
+}
+
+// ---------------------------------------------------------------------------
 // Commands: pre-launch readiness check
 // ---------------------------------------------------------------------------
 
@@ -1602,6 +1870,51 @@ pub fn check_provider_routes(
             .fold("ok".to_string(), |acc, c| worst(&acc, &c.status));
         reports.push(ProviderRouteReport {
             route: route.route,
+            status,
+            checks,
+        });
+    }
+    // deepseek-api-key plugin (issue #84): report its credential source and
+    // baseURL presence, reusing the same priority logic and i18n codes.
+    if let Some((api_key_env, base_url)) = parse_deepseek_config(&raw) {
+        let mut checks = Vec::new();
+        if api_key_env.is_empty() {
+            checks.push(check_item("noApiKeyEnv", "warn", &[]));
+        } else if env.iter().any(|(k, _)| k == &api_key_env) {
+            checks.push(check_item(
+                "credentialFromEnv",
+                "ok",
+                &[("name", api_key_env.clone())],
+            ));
+        } else if cred_refs.contains(&api_key_env) {
+            checks.push(check_item(
+                "credentialFromStore",
+                "ok",
+                &[("name", api_key_env.clone())],
+            ));
+        } else if dotenv.contains(&api_key_env) {
+            checks.push(check_item(
+                "credentialFromDotenv",
+                "ok",
+                &[("name", api_key_env.clone())],
+            ));
+        } else {
+            checks.push(check_item(
+                "credentialMissing",
+                "warn",
+                &[("name", api_key_env.clone())],
+            ));
+        }
+        if base_url.is_empty() {
+            checks.push(check_item("missingBaseUrl", "warn", &[]));
+        } else {
+            checks.push(check_item("baseUrlOk", "ok", &[]));
+        }
+        let status = checks
+            .iter()
+            .fold("ok".to_string(), |acc, c| worst(&acc, &c.status));
+        reports.push(ProviderRouteReport {
+            route: "deepseek-api-key".to_string(),
             status,
             checks,
         });
@@ -2121,7 +2434,12 @@ refs:
     // -- issue #85: advanced field editor -----------------------------------
 
     fn json_obj(pairs: &[(&str, serde_json::Value)]) -> serde_json::Value {
-        serde_json::Value::Object(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+        serde_json::Value::Object(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
     }
 
     #[test]
@@ -2171,8 +2489,14 @@ refs:
         // The advanced fields round-trip.
         let parsed = parse_provider_routes(&text).unwrap();
         let written = parsed.iter().find(|r| r.route == "my-gateway").unwrap();
-        assert_eq!(written.extra.get("retryPolicy").unwrap()["maxRetries"], serde_json::json!(3));
-        assert_eq!(written.extra.get("compat").unwrap()["responsesApi"], serde_json::json!(true));
+        assert_eq!(
+            written.extra.get("retryPolicy").unwrap()["maxRetries"],
+            serde_json::json!(3)
+        );
+        assert_eq!(
+            written.extra.get("compat").unwrap()["responsesApi"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]
@@ -2186,7 +2510,10 @@ refs:
         );
         let routes = parse_provider_routes(&raw).unwrap();
         let first = &routes[0];
-        assert_eq!(first.extra.get("retryPolicy").unwrap()["maxRetries"], serde_json::json!(3));
+        assert_eq!(
+            first.extra.get("retryPolicy").unwrap()["maxRetries"],
+            serde_json::json!(3)
+        );
         let mut edited = first.clone();
         edited.extra.remove("retryPolicy");
         let text = splice_route(&raw, &edited, Some("anvilcraft-ai")).unwrap();
@@ -2219,11 +2546,7 @@ refs:
 
     #[test]
     fn apply_routes_appends_and_preserves_comments_byte_for_byte() {
-        let comment_header = SAMPLE
-            .lines()
-            .take(3)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let comment_header = SAMPLE.lines().take(3).collect::<Vec<_>>().join("\n");
         let before = parse_provider_routes(SAMPLE).unwrap();
         let text = apply_routes_to_patch(
             SAMPLE,
@@ -2284,5 +2607,84 @@ refs:
             },
         ];
         assert!(apply_routes_to_patch(SAMPLE, &[dup]).is_err());
+    }
+
+    // -- issue #84: deepseek-api-key plugin config ----------------------
+
+    fn deepseek_sample() -> String {
+        r#"- id: llm-deepseek-api-key
+  name: '@deepseek-ai/dsh-llm-deepseek-api-key'
+  config:
+    apiKeyEnv: DEEPSEEK_API_KEY
+    baseURL: https://api.deepseek.com/anthropic
+"#
+        .to_string()
+    }
+
+    #[test]
+    fn parse_deepseek_config_reads_keys() {
+        let sample = deepseek_sample();
+        let raw = format!("{sample}\n{SAMPLE}");
+        let (env, url) = parse_deepseek_config(&raw).unwrap();
+        assert_eq!(env, "DEEPSEEK_API_KEY");
+        assert_eq!(url, "https://api.deepseek.com/anthropic");
+    }
+
+    #[test]
+    fn parse_deepseek_config_absent_when_no_entry() {
+        assert!(parse_deepseek_config(SAMPLE).is_none());
+    }
+
+    #[test]
+    fn splice_deepseek_config_appends_entry_when_absent() {
+        let text = splice_deepseek_config(
+            SAMPLE,
+            "DEEPSEEK_API_KEY",
+            "https://api.deepseek.com/anthropic",
+        )
+        .unwrap();
+        // Header comments and sibling entries survive.
+        assert!(text.starts_with("# Your patch layer"));
+        assert!(text.contains("- id: llm-deepseek-api-key"));
+        assert!(text.contains("name: '@deepseek-ai/dsh-llm-deepseek-api-key'"));
+        assert!(text.contains("apiKeyEnv: DEEPSEEK_API_KEY"));
+        assert!(text.contains("baseURL: https://api.deepseek.com/anthropic"));
+        // The pi-ai entry is untouched.
+        assert!(text.contains("@deepseek-ai/dsh-llm-pi-ai"));
+        assert!(parse_deepseek_config(&text).is_some());
+    }
+
+    #[test]
+    fn splice_deepseek_config_updates_existing_keys() {
+        let sample = deepseek_sample();
+        let raw = format!("{sample}\n{SAMPLE}");
+        let text = splice_deepseek_config(&raw, "MY_KEY", "https://example.com/v1").unwrap();
+        let (env, url) = parse_deepseek_config(&text).unwrap();
+        assert_eq!(env, "MY_KEY");
+        assert_eq!(url, "https://example.com/v1");
+        // The deepseek entry carries exactly the new key/url, and the old
+        // values are gone. (SAMPLE also contains other baseURL lines, so we
+        // match the full value rather than the bare key.)
+        assert_eq!(text.matches("apiKeyEnv: MY_KEY").count(), 1);
+        assert!(!text.contains("apiKeyEnv: DEEPSEEK_API_KEY"));
+        assert_eq!(text.matches("baseURL: https://example.com/v1").count(), 1);
+        assert!(!text.contains("baseURL: https://api.deepseek.com/anthropic"));
+    }
+
+    #[test]
+    fn splice_deepseek_config_preserves_other_config_keys() {
+        let raw = "- id: llm-deepseek-api-key\n  name: '@deepseek-ai/dsh-llm-deepseek-api-key'\n  config:\n    apiKeyEnv: DEEPSEEK_API_KEY\n    baseURL: https://x\n    extraFlag: keep-me\n";
+        let text = splice_deepseek_config(raw, "DEEPSEEK_API_KEY", "https://y").unwrap();
+        assert!(text.contains("extraFlag: keep-me"));
+        assert!(text.contains("baseURL: https://y"));
+    }
+
+    #[test]
+    fn splice_deepseek_config_removes_blank_value() {
+        let text =
+            splice_deepseek_config(&deepseek_sample(), "", "https://api.deepseek.com/anthropic")
+                .unwrap();
+        assert!(!text.contains("apiKeyEnv:"));
+        assert!(text.contains("baseURL: https://api.deepseek.com/anthropic"));
     }
 }

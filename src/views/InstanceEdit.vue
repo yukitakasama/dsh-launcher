@@ -17,6 +17,7 @@ import {
 import { useLauncherStore } from '@/stores/launcher'
 import type {
   CredentialRefInfo,
+  DeepseekApiKeyConfig,
   DshInstance,
   HomeLinkInfo,
   HomeLinkSuggestion,
@@ -1188,8 +1189,104 @@ async function loadCredentialRefs() {
 }
 
 watch(providerProfile, async () => {
-  if (activeTab.value === 'providers') await loadProviderRoutes()
+  if (activeTab.value === 'providers') {
+    await loadProviderRoutes()
+    await loadDeepseekApikey()
+  }
 })
+
+// --- deepseek-api-key unified entry (issue #84) ---
+// A single plugin (`@deepseek-ai/dsh-llm-deepseek-api-key`) that gives every
+// DeepSeek-capable route one shared apiKeyEnv + baseURL. This sub-section lets
+// the user set that entry directly instead of editing each route by hand.
+const deepseekConfig = ref<DeepseekApiKeyConfig | null>(null)
+const deepseekHash = ref('')
+const deepseekLoading = ref(false)
+const deepseekSaving = ref(false)
+const deepseekForm = ref<{ apiKeyEnv: string; baseUrl: string }>({ apiKeyEnv: '', baseUrl: '' })
+
+/** The apiKeyEnv / baseURL are read-only when the launch env already provides
+ *  them (DSH env wins over the patch file). */
+const deepseekApiKeyReadOnly = computed(
+  () => !!deepseekConfig.value?.shadowedByEnv,
+)
+const deepseekBaseUrlReadOnly = computed(
+  () => !!deepseekConfig.value?.baseUrlOverriddenByEnv,
+)
+const deepseekEditable = computed(
+  () => !!deepseekConfig.value && !deepseekApiKeyReadOnly.value && !deepseekBaseUrlReadOnly.value,
+)
+const deepseekDirty = computed(() => {
+  if (!deepseekConfig.value) return false
+  return (
+    deepseekForm.value.apiKeyEnv.trim() !== deepseekConfig.value.apiKeyEnv ||
+    deepseekForm.value.baseUrl.trim() !== deepseekConfig.value.baseUrl
+  )
+})
+const deepseekEnvError = computed(() => {
+  const env = deepseekForm.value.apiKeyEnv.trim()
+  if (!env) return t('instanceEdit.deepseekApiKeyEnvRequired')
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(env) ? '' : t('instanceEdit.deepseekApiKeyEnvInvalid')
+})
+const deepseekUrlError = computed(() => {
+  const url = deepseekForm.value.baseUrl.trim()
+  if (!url) return t('instanceEdit.deepseekBaseUrlRequired')
+  return isHttpUrl(url) ? '' : t('instanceEdit.deepseekBaseUrlInvalid')
+})
+const deepseekFormValid = computed(
+  () => deepseekEditable.value && !deepseekEnvError.value && !deepseekUrlError.value,
+)
+
+async function loadDeepseekApikey() {
+  deepseekConfig.value = null
+  if (!homeId.value || homeId.value === DEDICATED || !providerProfile.value || !editingId.value) {
+    return
+  }
+  deepseekLoading.value = true
+  try {
+    const cfg = await api.listDeepseekApikey(homeId.value, editingId.value, providerProfile.value)
+    deepseekConfig.value = cfg
+    deepseekHash.value = cfg.hash
+    deepseekForm.value = { apiKeyEnv: cfg.apiKeyEnv, baseUrl: cfg.baseUrl }
+  } catch (e) {
+    Message.error(String(e))
+  } finally {
+    deepseekLoading.value = false
+  }
+}
+
+async function saveDeepseekApikey() {
+  if (!deepseekConfig.value || !homeId.value || !providerProfile.value || !editingId.value) return
+  if (!deepseekFormValid.value) {
+    Message.warning(t('instanceEdit.deepseekFormInvalid'))
+    return
+  }
+  deepseekSaving.value = true
+  try {
+    const cfg = await api.saveDeepseekApikey(
+      homeId.value,
+      editingId.value,
+      providerProfile.value,
+      deepseekForm.value.apiKeyEnv.trim(),
+      deepseekForm.value.baseUrl.trim(),
+      deepseekHash.value,
+    )
+    deepseekConfig.value = cfg
+    deepseekHash.value = cfg.hash
+    deepseekForm.value = { apiKeyEnv: cfg.apiKeyEnv, baseUrl: cfg.baseUrl }
+    Message.success(t('instanceEdit.deepseekSaved'))
+  } catch (e) {
+    const msg = String(e)
+    if (msg.includes('STALE_HASH') || msg.includes('已被外部修改')) {
+      Message.error(t('instanceEdit.providerCheckReload'))
+      await loadDeepseekApikey()
+    } else {
+      Message.error(msg)
+    }
+  } finally {
+    deepseekSaving.value = false
+  }
+}
 
 /** Whether the form's route names a built-in catalog provider. */
 const providerFormCatalog = computed(() => PROVIDER_CATALOG_ROUTES.includes(providerForm.value.route.trim()))
@@ -2031,6 +2128,7 @@ watch(activeTab, async (tab) => {
       await loadProviderRoutes()
     }
     await loadCredentialRefs()
+    await loadDeepseekApikey()
     return
   }
   if (tab === 'storage') {
@@ -3048,6 +3146,71 @@ const terminalRunning = ref(false)
                   <a-empty :description="t('instanceEdit.credentialEmpty')" />
                 </template>
               </a-table>
+
+              <!-- DeepSeek unified api-key entry (issue #84): one shared
+                   apiKeyEnv + baseURL for every DeepSeek-capable route. -->
+              <h4 class="env-title provider-credential-title">
+                {{ t('instanceEdit.deepseekTitle') }}
+                <HintIcon :content="t('instanceEdit.deepseekDesc')" />
+              </h4>
+              <a-spin :loading="deepseekLoading" class="deepseek-spin">
+                <template v-if="deepseekConfig">
+                  <a-alert
+                    v-if="deepseekApiKeyReadOnly || deepseekBaseUrlReadOnly"
+                    type="warning"
+                    class="deepseek-readonly"
+                  >
+                    {{ t('instanceEdit.deepseekReadOnlyHint') }}
+                  </a-alert>
+                  <a-form :model="deepseekForm" layout="vertical" class="deepseek-form">
+                    <a-form-item
+                      :label="t('instanceEdit.deepseekApiKeyEnvLabel')"
+                      :validate-status="deepseekEnvError ? 'error' : undefined"
+                      :help="deepseekEnvError || t('instanceEdit.deepseekApiKeyEnvHelp')"
+                    >
+                      <a-input
+                        v-model="deepseekForm.apiKeyEnv"
+                        :disabled="deepseekApiKeyReadOnly"
+                        :placeholder="t('instanceEdit.deepseekApiKeyEnvPlaceholder')"
+                      />
+                    </a-form-item>
+                    <a-form-item
+                      :label="t('instanceEdit.deepseekBaseUrlLabel')"
+                      :validate-status="deepseekUrlError ? 'error' : undefined"
+                      :help="deepseekUrlError || t('instanceEdit.deepseekBaseUrlHelp')"
+                    >
+                      <a-input
+                        v-model="deepseekForm.baseUrl"
+                        :disabled="deepseekBaseUrlReadOnly"
+                        :placeholder="t('instanceEdit.deepseekBaseUrlPlaceholder')"
+                      />
+                    </a-form-item>
+                    <a-form-item :label="t('instanceEdit.deepseekCredentialLabel')">
+                      <code v-if="deepseekConfig.masked" class="provider-cred">{{ deepseekConfig.masked }}</code>
+                      <span v-else class="provider-none">{{ t('instanceEdit.providerNoCredential') }}</span>
+                    </a-form-item>
+                    <a-form-item>
+                      <a-space>
+                        <a-button
+                          type="primary"
+                          :disabled="!deepseekFormValid || !deepseekDirty || deepseekSaving"
+                          :loading="deepseekSaving"
+                          @click="saveDeepseekApikey"
+                        >
+                          {{ t('instanceEdit.deepseekSave') }}
+                        </a-button>
+                        <a-button
+                          :disabled="!deepseekDirty || deepseekSaving"
+                          @click="deepseekForm = { apiKeyEnv: deepseekConfig?.apiKeyEnv ?? '', baseUrl: deepseekConfig?.baseUrl ?? '' }"
+                        >
+                          {{ t('instanceEdit.deepseekReset') }}
+                        </a-button>
+                      </a-space>
+                    </a-form-item>
+                  </a-form>
+                </template>
+                <a-empty v-else :description="t('instanceEdit.deepseekEmpty')" />
+              </a-spin>
             </template>
 
             <a-alert v-else type="info">

@@ -383,6 +383,8 @@ pub fn run() {
             providers::delete_credential_ref,
             providers::check_provider_routes,
             providers::provider_advanced_schemas,
+            providers::list_deepseek_apikey,
+            providers::save_deepseek_apikey,
             commands::get_settings,
             commands::update_settings,
             commands::fetch_news,
