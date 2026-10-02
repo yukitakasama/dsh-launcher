@@ -576,10 +576,8 @@ pub fn validate_advanced_field(key: &str, value: &serde_json::Value) -> Result<(
     let Some(schema) = ADVANCED_FIELD_SCHEMAS.iter().find(|s| s.key == key) else {
         return Ok(());
     };
-    if schema.kind == "object" {
-        if !value.is_object() {
-            return Err(format!("高级字段「{key}」需为对象（mapping）形式"));
-        }
+    if schema.kind == "object" && !value.is_object() {
+        return Err(format!("高级字段「{key}」需为对象（mapping）形式"));
     }
     Ok(())
 }
