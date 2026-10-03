@@ -55,6 +55,12 @@ import type {
   EarlyLoadingContext,
   EarlyLoadingProgress,
   LaunchStage,
+  CatalogModel,
+  CatalogProvider,
+  CredentialInfo,
+  DiscoverModelsInput,
+  ProviderCatalog,
+  ProviderRoute,
 } from './types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -84,6 +90,10 @@ interface MockDb {
   running: Record<string, InstanceStatus>
   /** MCP servers per scope key `<homeId>::<profile|__global__>`. */
   mcp: Record<string, McpServer[]>
+  /** Model provider routes per scope key (issue #89). */
+  providers: Record<string, ProviderRoute[]>
+  /** Mock credential store: reference name -> "configured" marker only. */
+  credentials: Record<string, boolean>
 }
 
 function seedDb(): MockDb {
@@ -145,6 +155,8 @@ function seedDb(): MockDb {
     },
     running: {},
     mcp: {},
+    providers: {},
+    credentials: {},
   }
 }
 
@@ -167,6 +179,8 @@ function loadDb(): MockDb {
       db.settings.update_channel = db.settings.update_channel ?? 'dev'
       db.settings.update_suppressed = db.settings.update_suppressed ?? []
       db.mcp = db.mcp ?? {}
+      db.providers = db.providers ?? {}
+      db.credentials = db.credentials ?? {}
       db.homes.forEach((h) => {
         h.links = h.links ?? {}
       })
@@ -193,6 +207,23 @@ function mcpScopeKey(args?: Record<string, unknown>): string {
   const profile = (args?.profile as string | null | undefined) ?? '__global__'
   return `${String(args?.homeId ?? '')}::${profile}`
 }
+
+/** Same shape as `mcpScopeKey`, for model provider routes (issue #89). */
+function providerScopeKey(args?: Record<string, unknown>): string {
+  return mcpScopeKey(args)
+}
+
+/** Catalogue shown by the browser preview; mirrors pi-ai's built-in list. */
+const MOCK_CATALOG: CatalogProvider[] = [
+  { id: 'anthropic', name: 'Anthropic', api: 'anthropic-messages', baseUrl: 'https://api.anthropic.com', modelCount: 9, apiKey: true },
+  { id: 'deepseek', name: 'DeepSeek', api: 'openai-completions', baseUrl: 'https://api.deepseek.com', modelCount: 4, apiKey: true },
+  { id: 'moonshotai', name: 'Moonshot AI', api: 'openai-completions', baseUrl: 'https://api.moonshot.ai/v1', modelCount: 6, apiKey: true },
+  { id: 'openai', name: 'OpenAI', api: 'openai-responses', baseUrl: 'https://api.openai.com/v1', modelCount: 25, apiKey: true },
+  { id: 'openrouter', name: 'OpenRouter', api: 'openai-completions', baseUrl: 'https://openrouter.ai/api/v1', modelCount: 320, apiKey: true },
+  { id: 'zai', name: 'Z.AI', api: 'openai-completions', baseUrl: 'https://api.z.ai/api/coding/paas/v4', modelCount: 5, apiKey: true },
+  // OAuth-only, so DSH does not list it and neither does the launcher.
+  { id: 'openai-codex', name: 'OpenAI Codex', api: 'openai-codex-responses', baseUrl: 'https://chatgpt.com/backend-api', modelCount: 3, apiKey: false },
+]
 
 // Simple event emitter used by the mock to mimic Tauri events.
 type Listener<T> = (payload: T) => void
@@ -1007,6 +1038,108 @@ async function mockCall<T>(cmd: string, args?: Record<string, unknown>): Promise
       saveDb(db)
       return db.mcp[key] as T
     }
+    // ---- Model providers (issue #89) ----
+    case 'list_provider_catalog':
+      return { providers: MOCK_CATALOG, notice: null } as T
+    case 'list_catalog_models': {
+      const providerId = String(args?.providerId ?? '')
+      return [
+        { id: `${providerId}-fast`, name: `${providerId} fast`, context_window: 262144, max_tokens: 65536, input: ['text'] },
+        { id: `${providerId}-pro`, name: `${providerId} pro`, context_window: 1000000, max_tokens: 131072, input: ['text', 'image'] },
+      ] as T
+    }
+    case 'list_provider_routes': {
+      const key = providerScopeKey(args)
+      const list = [...(db.providers[key] ?? [])]
+      const ref = (r: ProviderRoute) => r.apiKeyEnv || `${r.id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`
+      const withCredential = (r: ProviderRoute): ProviderRoute => ({
+        ...r,
+        credential: r.official
+          ? {
+              configured: !!db.credentials['DEEPSEEK_API_KEY'],
+              source: db.credentials['DEEPSEEK_API_KEY'] ? 'file' : null,
+              writable: true,
+              overriddenByInstance: false,
+            }
+          : {
+              configured: !!db.credentials[ref(r)],
+              source: db.credentials[ref(r)] ? 'file' : null,
+              writable: true,
+              overriddenByInstance: false,
+            },
+      })
+      const deepseek: ProviderRoute = {
+        id: 'deepseek-official',
+        displayName: 'DeepSeek',
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        api: '',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        catalog: false,
+        official: true,
+        models: [],
+        extraKeys: [],
+        credential: null,
+      }
+      return [withCredential(deepseek), ...list.map(withCredential)] as T
+    }
+    case 'save_provider_route': {
+      const key = providerScopeKey(args)
+      const list = [...(db.providers[key] ?? [])]
+      const route = { ...(args?.route as ProviderRoute) }
+      const originalId = String(args?.originalId ?? '')
+      const apiKey = String(args?.apiKey ?? '')
+      if (apiKey) {
+        const ref = route.apiKeyEnv || `${route.id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`
+        db.credentials[ref] = true
+      }
+      if (route.official) {
+        saveDb(db)
+        return list as T
+      }
+      const index = originalId ? list.findIndex((r) => r.id === originalId) : -1
+      if (index >= 0) list[index] = { ...route, id: originalId }
+      else list.push(route)
+      db.providers[key] = list
+      saveDb(db)
+      return list as T
+    }
+    case 'delete_provider_route': {
+      const key = providerScopeKey(args)
+      const id = String(args?.id ?? '')
+      if (id === 'deepseek-official') {
+        delete db.credentials['DEEPSEEK_API_KEY']
+      } else {
+        const removed = (db.providers[key] ?? []).find((r) => r.id === id)
+        db.providers[key] = (db.providers[key] ?? []).filter((r) => r.id !== id)
+        if (removed) {
+          const ref = removed.apiKeyEnv || `${removed.id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`
+          const stillUsed = db.providers[key].some(
+            (r) => (r.apiKeyEnv || `${r.id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`) === ref,
+          )
+          if (!stillUsed) delete db.credentials[ref]
+        }
+      }
+      saveDb(db)
+      return (db.providers[key] ?? []) as T
+    }
+    // The browser preview never touches the network.
+    case 'discover_provider_models': {
+      const providerId = String((args?.input as DiscoverModelsInput | undefined)?.provider ?? '')
+      const prefix = providerId || 'custom'
+      return [
+        { id: `${prefix}-discovered-1`, name: `${prefix} discovered 1`, contextWindow: 131072, maxTokens: 32768, input: [] },
+        { id: `${prefix}-discovered-2`, name: `${prefix} discovered 2`, contextWindow: 262144, maxTokens: 65536, input: [] },
+      ] as T
+    }
+    case 'describe_credential': {
+      const reference = String(args?.reference ?? '')
+      return {
+        configured: !!db.credentials[reference],
+        source: db.credentials[reference] ? 'file' : null,
+        writable: true,
+        overridden_by_instance: false,
+      } as T
+    }
     case 'read_modpack_manifest':
       return {
         manifestVersion: 4,
@@ -1553,6 +1686,53 @@ export const api = {
   /** Deletes one MCP server row; resolves to the scope's remaining servers. */
   deleteMcpServer: (homeId: string, profile: string | null, id: string) =>
     call<McpServer[]>('delete_mcp_server', { homeId, profile, id }),
+  /**
+   * Built-in providers the installed catalogue can supply (issue #89). Read
+   * from the instance's `@earendil-works/pi-ai` package, so the launcher offers
+   * the same list DSH's own models page does.
+   */
+  listProviderCatalog: (instanceId: string) =>
+    call<ProviderCatalog>('list_provider_catalog', { instanceId }),
+  /** Models of a built-in provider, answered by the catalogue — no network. */
+  listCatalogModels: (instanceId: string, providerId: string) =>
+    call<CatalogModel[]>('list_catalog_models', { instanceId, providerId }),
+  /**
+   * Configured routes of one scope, DeepSeek card first (issue #89).
+   * `profile: null` reads `<HOME>/cordis.patch.yml`; a profile name reads
+   * `<HOME>/profiles/<profile>/cordis.patch.yml`.
+   */
+  listProviderRoutes: (homeId: string, profile: string | null, instanceId: string | null) =>
+    call<ProviderRoute[]>('list_provider_routes', { homeId, profile, instanceId }),
+  /**
+   * Creates or updates one route (issue #89). `apiKey` travels separately and
+   * is write-only: it is stored in `.credentials.yaml` and never read back.
+   * Resolves to the scope's routes as re-read from disk.
+   */
+  saveProviderRoute: (
+    homeId: string,
+    profile: string | null,
+    instanceId: string | null,
+    route: ProviderRoute,
+    originalId: string | null,
+    apiKey: string,
+  ) =>
+    call<ProviderRoute[]>('save_provider_route', {
+      homeId,
+      profile,
+      instanceId,
+      route,
+      originalId,
+      apiKey,
+    }),
+  /** Deletes one route and its credential when nothing else refers to it. */
+  deleteProviderRoute: (homeId: string, profile: string | null, instanceId: string | null, id: string) =>
+    call<ProviderRoute[]>('delete_provider_route', { homeId, profile, instanceId, id }),
+  /** Asks an endpoint which models it serves; built-ins skip the request. */
+  discoverProviderModels: (input: DiscoverModelsInput) =>
+    call<CatalogModel[]>('discover_provider_models', { input }),
+  /** Descriptor for one credential reference; never returns the secret. */
+  describeCredential: (instanceId: string | null, homeId: string, reference: string) =>
+    call<CredentialInfo>('describe_credential', { instanceId, homeId, reference }),
   exportModpack: (input: ExportModpackInput) => call<string>('export_modpack', { input }),
   /** Multi-profile (manifest v5 dshhome) export. */
   exportDshhomeModpack: (input: ExportDshhomeInput) =>

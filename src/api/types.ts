@@ -456,6 +456,89 @@ export interface McpServer {
   extra: Record<string, unknown>
 }
 
+// ---------------------------------------------------------------------------
+// Model providers (issue #89) — mirrors src-tauri/src/providers.rs
+// ---------------------------------------------------------------------------
+
+/** One model entry as the models form shows it. */
+export interface ProviderModel {
+  id: string
+  name: string
+  contextWindow: number | null
+  maxTokens: number | null
+}
+
+/** One configured route: a `providers` key plus what the form edits. */
+export interface ProviderRoute {
+  /** The `providers` dictionary key — permanent, never renamed. */
+  id: string
+  displayName: string
+  /** Credential reference; derived from the id when left empty. */
+  apiKeyEnv: string
+  api: string
+  baseUrl: string
+  /** True when the installed catalogue ships this provider. */
+  catalog: boolean
+  /** True for the synthetic DeepSeek card, which is credential-only. */
+  official: boolean
+  models: ProviderModel[]
+  /** Route keys the form does not surface; they are kept as-is on save. */
+  extraKeys: string[]
+  /** Filled by list; ignored by save. */
+  credential: CredentialInfo | null
+}
+
+/** A provider the installed catalogue can supply. */
+export interface CatalogProvider {
+  id: string
+  name: string
+  api: string
+  baseUrl: string
+  modelCount: number
+  /** False for OAuth-only providers, which DSH does not list either. */
+  apiKey: boolean
+}
+
+/** A model as the catalogue or a discovery response describes it. */
+export interface CatalogModel {
+  id: string
+  name: string
+  contextWindow: number | null
+  maxTokens: number | null
+  input: string[]
+}
+
+export interface ProviderCatalog {
+  providers: CatalogProvider[]
+  /** Set when part of the catalogue could not be read. */
+  notice: string | null
+}
+
+/** Descriptor for one credential reference; never carries the secret. */
+export interface CredentialInfo {
+  configured: boolean
+  /** "env" | "file" | "project-env" | "user-env"; null when unset. */
+  source: string | null
+  /** Only the "file" layer is writable through the launcher. */
+  writable: boolean
+  /** The instance's env overrides supply it, outranking the store. */
+  overriddenByInstance: boolean
+}
+
+/** Input for model discovery; mirrors what the form currently holds. */
+export interface DiscoverModelsInput {
+  instanceId: string
+  homeId: string
+  profile: string | null
+  /** Catalogue provider id when adding a built-in provider. */
+  provider: string | null
+  baseUrl: string
+  api: string
+  apiKey: string
+  /** Route being edited, so a stored key can be reused. */
+  routeId: string | null
+}
+
 export interface NewInstanceInput {
   name: string
   version_id: string

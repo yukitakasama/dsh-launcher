@@ -2,6 +2,7 @@ mod applog;
 mod commands;
 mod compatibility;
 mod config;
+mod credentials;
 mod doctor;
 mod early_loading;
 mod icons;
@@ -11,6 +12,7 @@ mod migrate;
 mod modpack;
 mod plugins;
 mod process;
+mod providers;
 mod proxy;
 mod runtime;
 mod scan;
@@ -365,6 +367,13 @@ pub fn run() {
             mcp::list_mcp_servers,
             mcp::save_mcp_server,
             mcp::delete_mcp_server,
+            providers::list_provider_catalog,
+            providers::list_catalog_models,
+            providers::list_provider_routes,
+            providers::save_provider_route,
+            providers::delete_provider_route,
+            providers::discover_provider_models,
+            providers::describe_credential,
             commands::get_settings,
             commands::update_settings,
             commands::fetch_news,
